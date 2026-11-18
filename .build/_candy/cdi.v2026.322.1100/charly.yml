@@ -1,0 +1,165 @@
+repo: github.com/opencharly/layer-cdi
+
+cdi:
+    candy:
+        description: |
+            The CDI runtime contract for GPU images, and the ONLY layer that owns it.
+
+            A GPU container does not get its driver from the image: the kernel module is
+            host-global, so the driver user-space must come from the host, injected per container
+            (`--device nvidia.com/gpu=all`, via the NVIDIA container toolkit's CDI spec and its
+            runtime hook). An image that bakes its own driver user-space does not merely duplicate
+            that — it WINS the SONAME resolution, because the injection mounts the host's VERSIONED
+            files (libnvidia-ml.so.615.78.08, ...) and the image's own newer copy
+            (libnvidia-ml.so.620.70.06) stays visible next to them, so `libnvidia-ml.so.1` resolves
+            to the baked one. `nvidia-smi` then exits 18 with "Driver/library version mismatch", and
+            every consumer that estimates free memory through NVML — ollama among them — silently
+            degrades to CPU while answering normally. Measured on CachyOS, October 2026:
+            host module 615.78.08 against a baked userspace 620.70.06, ollama offloading 0/29
+            layers. opencharly/layer-cuda#21.
+
+            So this layer does exactly three things, and every GPU image composes it:
+
+              1. REMOVES the host-coupled driver user-space and the `nvidia*` binaries that a
+                 distro package manager installs as a side effect of installing the CUDA toolkit
+                 (`pacman -S cuda` depends on `nvidia-utils`; `dnf install cuda-nvcc` pulls
+                 `nvidia-driver` userspace on some distros).
+              2. PROVES, at build time and again at check time, that none of them remain — including
+                 the versioned files, because the CDI create-symlinks hook re-creates each SONAME
+                 link from whatever versioned file it finds.
+              3. PROVES, at check time, that the container actually resolved the INJECTED driver and
+                 that its version equals the running kernel module's.
+
+            What this layer deliberately does NOT remove: the Vulkan/OpenCL ICD JSONs. They name a
+            SONAME (`libGLX_nvidia.so.0`), not a version, so the link the injection creates
+            satisfies them — which is why they are part of the contract rather than a violation of
+            it.
+        require:
+            # THE ORDER IS THE CONTRACT. This layer's assertions must run AFTER every layer that
+            # can install host-coupled driver user-space, and `cuda` is that layer: on the pac path
+            # `pacman -S cuda` DEPENDS on nvidia-utils. Measured: with no requirement, the ordering
+            # put this layer BEFORE cuda and its assertion reported
+            #   cdi: driver libraries still baked: 138
+            # on a box that composes both — a true reading of a half-built image, and exactly the
+            # class of noise that makes a gate ignorable. Requiring the toolkit makes the order a
+            # property of the graph instead of a property of how a box happens to list its candies.
+            #
+            # A CPU-only image does not compose this layer at all: the CDI contract is about how a
+            # container gets a GPU driver, so an image with no CUDA toolkit has nothing to assert.
+            - '@github.com/opencharly/layer-cuda:v2026.321.1520'
+        plan:
+            # ---------------------------------------------------------------- the removal
+            # NOT here. The strip lives in `layer-cuda`, because `layer-cuda` is what installs
+            # `cuda` — and on the pac path `cuda` DEPENDS on `nvidia-utils`, so the toolkit layer is
+            # the one that pulls the driver user-space in and the one that must clean up after
+            # itself. Keeping the removal in exactly one place is the rule; this layer's job is to
+            # PROVE the result, which is the half that was missing.
+            #
+            # What a consumer must do: compose `layer-cuda` (which strips) and this layer (which
+            # asserts and probes), and name the image with a `-cdi` suffix.
+            # ---------------------------------------------------------------- the build-time proof
+            # A `run:` executes in the build container, where no CDI has injected anything, so a
+            # match here is unambiguously IMAGE content. A `check:` step may run in a GPU-attached
+            # container where the host's identical libraries sit at the same paths, and only
+            # /proc/self/mountinfo could tell them apart (not readable on every venue; measured red
+            # on a CORRECT image for exactly that reason). Enforcement that cannot be fooled lives
+            # here.
+            # A `run:` rather than a `check:` for two reasons that agree: a candy must carry at least
+            # one install-bearing step to be composable at all, and the assertion BELONGS at build
+            # time, where it can neither be skipped nor see an injection.
+            - run: no host-coupled driver library is baked — the injection is the only provider
+              id: cdi-no-baked-driver-libs
+              run_as: root
+              command: |
+                set -eu
+                # The directories are overridable so the assertion can be EXECUTED against fixtures
+                # (and so a bed can prove it discriminates) without a GPU or an image build. The
+                # default is the image's own layout.
+                # THREE surfaces, because the removal touches three: the top-level libraries, the
+                # driver TREES the packages ship (nvidia/, vdpau/ — where libvdpau_nvidia.so lives),
+                # and the xorg driver. An assertion that only counts the first surface passes on an
+                # image whose vdpau/xorg driver content survived, which is exactly what the deleted
+                # strip's `rm -rf` lines existed to remove.
+                libs=${CDI_LIB_DIRS:-/usr/lib /usr/lib64}
+                trees=${CDI_TREE_DIRS:-/usr/lib/nvidia /usr/lib64/nvidia /usr/lib/vdpau}
+                xorg=${CDI_XORG_DRIVER:-/usr/lib/xorg/modules/drivers/nvidia_drv.so}
+                left=0
+                for d in $libs; do
+                  [ -d "$d" ] || continue
+                  n=$(find "$d" -maxdepth 1 \( -type f -o -type l \) \
+                      \( -name 'libnvidia-*.so*' -o -name 'libcuda*.so*' -o -name 'libnvcuvid.so*' \
+                      -o -name 'libnvoptix.so*' -o -name 'libGLX_nvidia.so*' \
+                      -o -name 'libEGL_nvidia.so*' -o -name 'libGLESv1_CM_nvidia.so*' \
+                      -o -name 'libGLESv2_nvidia.so*' -o -name 'libvdpau_nvidia.so*' \) 2>/dev/null | wc -l)
+                  left=$((left + n))
+                done
+                for d in $trees; do
+                  [ -d "$d" ] || continue
+                  n=$(find "$d" \( -type f -o -type l \) 2>/dev/null | wc -l)
+                  left=$((left + n))
+                done
+                if [ -e "$xorg" ] || [ -L "$xorg" ]; then left=$((left + 1)); fi
+                echo "cdi: driver libraries still baked: $left"
+                test "$left" -eq 0
+
+            - run: no host-coupled nvidia binary is baked — the injection is the only provider
+              id: cdi-no-baked-driver-binaries
+              run_as: root
+              command: |
+                set -eu
+                bins=${CDI_BIN_DIRS:-/usr/bin /usr/local/bin /usr/sbin}
+                left=0
+                for d in $bins; do
+                  [ -d "$d" ] || continue
+                  n=$(find "$d" -maxdepth 1 \( -type f -o -type l \) -name 'nvidia*' 2>/dev/null | wc -l)
+                  left=$((left + n))
+                done
+                echo "cdi: nvidia binaries still baked: $left"
+                test "$left" -eq 0
+
+            # ---------------------------------------------------------------- the runtime proof
+            # THE control that catches the failure this layer exists for. It runs in the deployed
+            # container, GPU attached, and compares the version the container RESOLVED against the
+            # running kernel module's. A baked library that won the SONAME resolution shows up as a
+            # mismatch here and nowhere else: the server keeps answering, the API returns 200, and
+            # inference quietly runs on CPU.
+            - check: the container resolved the INJECTED host driver, and its version equals the running kernel module's
+              id: cdi-injected-driver-matches-module
+              context: [runtime]
+              exit_status: 0
+              command: |
+                set -eu
+                lib=$(ls /usr/lib/libnvidia-ml.so.1 2>/dev/null || true)
+                [ -n "$lib" ] || { echo "cdi: no libnvidia-ml.so.1 — nothing was injected"; exit 1; }
+                uv=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
+                km=$(grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' /proc/driver/nvidia/version 2>/dev/null | head -1 || true)
+                echo "cdi: userspace=$uv kernel-module=$km lib=$(readlink -f "$lib")"
+                [ -n "$uv" ] || { echo "cdi: nvidia-smi did not report a driver version"; exit 1; }
+                [ "$uv" = "$km" ] || { echo "cdi: DRIVER/LIBRARY MISMATCH — an image library shadows the injected host driver"; exit 1; }
+
+cdi-skill:
+    skill:
+        name: cdi
+        family: distros
+        owner: cdi
+        description: |-
+            The CDI runtime contract for GPU images: no baked driver user-space or driver binaries,
+            the ICD JSONs that name SONAMEs rather than versions, and the probe that proves a
+            container resolved the INJECTED host driver at the running kernel module's version.
+            MUST be invoked before composing or debugging any GPU image (nvidia, cuda, ollama,
+            comfyui, immich-ml, jupyter-ml, python-ml, versa, unsloth-studio).
+        triggers:
+            - "CDI / nvidia.com/gpu / `--device nvidia.com/gpu=all` / a GPU image whose driver libraries must come from the host"
+            - "nvidia-smi reports Driver/library version mismatch / inference runs on CPU on a GPU host / VRAM estimate is empty"
+
+cdi-layer-skill:
+    skill:
+        name: cdi-layer
+        family: distros
+        owner: cdi
+        description: |-
+            The `cdi` CANDY itself — what it removes, what it deliberately keeps (the ICD JSONs), the
+            build-time assertion that cannot be fooled, and the runtime check that catches a shadowed
+            injection.
+        triggers:
+            - "editing candy/cdi, the driver-user-space strip, or the injected-driver probe"

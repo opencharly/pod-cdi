@@ -1,0 +1,76 @@
+#  opencharly/distro-cachyos — the cachyos-os-skills skill carrier, completed.
+#
+#  WHAT THIS ADDS (opencharly/sdk#434, the operator's extended ruling): this
+#  directory already held 4 skill node(s) but declared **no `candy:` node**, so it was
+#  not a candy: `candy: [cachyos-os-skills]` failed with `candy "cachyos-os-skills" not found`,
+#  and the operator ruling names that exact measurement. The carrier is now a real
+#  package candy, so the images that carry these skills can COMPOSE it — which is what
+#  makes each skill ride its image AND reach `ai.opencharly.skill`.
+#
+#  THE NODES KEEP ONLY THE ROUTING (name/family/owner/triggers); the prose lives in
+#  `candy/cachyos-os-skills/.agents/skills/<name>/SKILL.md`, the path
+#  `deploykit.CollectSkillBodies` reads (`<owner candy SourceDir>/.agents/skills/`).
+#  The inline `content:` blocks this repo still carried were byte-identical
+#  duplicates of the root `.agents/skills/` files (`#132` added the files without
+#  stripping the bodies); they are stripped HERE, and the root tree is gone, so
+#  there is exactly one copy.
+cachyos-os-skills:
+    candy:
+        description: |-
+            The CachyOS skill carrier for the OS skills (`cachyos`, `cachyos-pacstrap`, `cachyos-pacstrap-builder`, `githubrunner`).  It ships no install
+            content — its payload is the skill prose under `.agents/skills/`, read at build
+            time by the skill collector — and it exists because a skill's `owner:` must name
+            a candy that rides an image, not the image itself (opencharly/sdk#434).
+        plan:
+            - run: this skill-carrier candy ships no install content
+              command: "true"
+              context:
+                - build
+            # ADE wants a deterministic `check:`, and this carrier has nothing to assert
+            # INSIDE the image: it ships no install content, and its payload (the SKILL.md
+            # files) is read at build-config time from the source tree, never copied into the
+            # image. The prose says exactly that — an earlier draft claimed it verified body
+            # resolution, which `true` cannot do; that is covered by `charly box validate`
+            # (deploykit.CollectSkillBodies), whose mutation control is recorded in this PR.
+            - check: this carrier registers as a candy and ships no install content — its skill bodies are validated at build-config time by `charly box validate`, not inside the image
+              id: cachyos-os-skills-no-install-content
+              context:
+                - build
+              command: "true"
+
+cachyos-skill:
+    skill:
+        name: cachyos
+        family: distros
+        owner: cachyos-os-skills
+        triggers:
+            - "CachyOS images / `cachyos*` / `charly-cachyos` workstation profile / `box/cachyos` submodule"
+
+cachyos-pacstrap-skill:
+    skill:
+        name: cachyos-pacstrap
+        family: distros
+        owner: cachyos-os-skills
+cachyos-pacstrap-builder-skill:
+    skill:
+        name: cachyos-pacstrap-builder
+        family: distros
+        owner: cachyos-os-skills
+githubrunner-skill:
+    skill:
+        name: githubrunner
+        family: distros
+        owner: cachyos-os-skills
+# Relocated by the skills-only carrier retirement (opencharly/opencharly#600,
+# #628): `crabbox-deploy` came from the `pod-charly-automation` carrier when the
+# operator settled its four-repo ambiguity on THIS repo — the one that holds the
+# two images it documents (`box/crabbox`, `box/crabbox-e2e`), both disposable beds
+# (`check-crabbox-pod`, `check-crabbox-e2e-pod`) and `plan/crabbox-loop-cutover.md`.
+# `family:` stays `automation`, so `/charly-automation:crabbox-deploy` still resolves.
+crabbox-deploy-skill:
+    skill:
+        name: crabbox-deploy
+        family: automation
+        owner: cachyos-os-skills
+        triggers:
+            - "crabbox CLI / local coordinator / remote-execution broker / composing the crabbox candies"

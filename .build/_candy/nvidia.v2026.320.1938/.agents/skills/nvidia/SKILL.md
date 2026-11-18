@@ -1,0 +1,123 @@
+---
+name: nvidia
+description: 'NVIDIA GPU base image with runtime support and CUDA toolkit on Fedora.
+  Base for all
+
+  GPU-accelerated boxes (python-ml, jupyter, ollama, comfyui).
+
+  MUST be invoked before building, deploying, configuring, or troubleshooting the
+  nvidia box.'
+---
+
+# nvidia
+
+NVIDIA GPU base image — provides GPU runtime (driver libs, CDI toolkit) and CUDA development toolkit on Fedora.
+
+The `nvidia` and `cuda` candies are multi-distro (Fedora rpm + Arch pac), so a
+CachyOS GPU base exists alongside this Fedora `nvidia` box: `cachyos.nvidia`
+(cachyos + agent-forwarding + nvidia + cuda) in the `opencharly/distro-cachyos`
+submodule. The two are siblings — pick the Fedora `nvidia` box for the
+RPM-based GPU stack, `cachyos.nvidia` for the Arch/CachyOS GPU stack. See
+`/charly-distros:cachyos`.
+
+## Box Properties
+
+| Property | Value |
+|----------|-------|
+| Base | fedora-nonfree (fedora + RPM Fusion) |
+| Layers | agent-forwarding, nvidia, cuda |
+| Platforms | linux/amd64 |
+| Registry | ghcr.io/opencharly |
+
+## Full Candy Stack
+
+1. `fedora-nonfree` (fedora + rpmfusion — provides RPM Fusion free + nonfree repos)
+2. `nvidia` — GPU runtime: driver libs, nvidia-container-toolkit (CDI), VA-API
+3. `cuda` — CUDA toolkit, cuDNN, onnxruntime, ffmpeg-libs
+
+## Quick Start
+
+The `nvidia` box lives in the `opencharly/distro-fedora` submodule (`box/fedora`):
+
+```bash
+charly -C box/fedora box build nvidia
+charly shell nvidia
+```
+
+## Key Candies
+
+- `/charly-distros:nvidia` — NVIDIA GPU runtime (driver libs, CDI generation via nvidia-ctk)
+- `/charly-distros:cuda` — CUDA toolkit and GPU development libraries
+
+## CDI host layer
+
+`nvidia-cdi-host` extends `nvidia` for a **host** (not a workload image). It composes
+the `nvidia` candy and then:
+
+- runs `nvidia-ctk runtime configure --runtime=containerd` with an explicit,
+  layer-owned `--drop-in-config /etc/containerd/conf.d/99-nvidia.toml`, **without**
+  `--enable-cdi` (CDI is always on in containerd 2.x and the key is ignored with a
+  warning) and **without** `--set-as-default` (the handler is selected per pod or
+  container). The command also records the drop-in directory in `config.toml`'s
+  `imports`, and the layer fails closed if the drop-in or the import does not land;
+- **restarts containerd** after writing the drop-in. containerd reads its config and
+  drop-ins at startup, so a written drop-in is not a live handler; measured on the
+  GPU host, a drop-in naming `nvidia` sat beside a running daemon that listed only
+  `crun`;
+- enables **and starts** the toolkit's `nvidia-cdi-refresh.path` and `.service`, so
+  **`/var/run/cdi/nvidia.yaml`** is regenerated at boot, on nvidia module load and
+  when the toolkit changes, and exists on a fresh host before the checks run. A
+  one-shot `nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` is a snapshot:
+  the driver version appears ~115x in the generated spec and goes stale on the first
+  driver upgrade;
+- links the refreshed spec into the rootless client's config dir. The rootless spec
+  dirs are `$XDG_CONFIG_HOME/cdi` and `$XDG_RUNTIME_DIR/cdi`, never `/etc/cdi`; the
+  link helper resolves the user's `XDG_CONFIG_HOME` from their login environment
+  (default `~/.config`) and targets `nvidia.yaml -> /var/run/cdi/nvidia.yaml`. For a
+  user that does not exist at build time, a `user-tmpfiles.d` rule creates the
+  client-default `%h/.config/cdi/nvidia.yaml` at first login — systemd-tmpfiles has
+  no `XDG_CONFIG_HOME` specifier, which is the rule's documented limitation.
+
+Verify the **device**, never an exit code: `nvidia-ctk cdi list` exits 0 on an
+invalid spec (`Found 0 CDI devices`), and two same-priority specs leave the device
+dropped. The layer's checks require `crictl info` to serve the `nvidia` handler,
+`nvidia-ctk cdi list` to report `nvidia.com/gpu=all`, and
+`--device nvidia.com/gpu=all` to run `nvidia-smi -L`. The
+`check-nvidia-cdi-host` bed carries the same sequence rootful and rootless, and
+skips visibly with `prereq-gpu-skipped` on a host without the GPU. Its
+data-producing steps were executed individually against scratch daemons on an
+RTX 4080 SUPER host; a full `charly check run` on a **disposable** GPU host is
+the remaining gate and is not yet recorded.
+
+Arch/omarchy only: a Fedora arm is additive and is not claimed until its own
+disposable bed exists.
+
+## Derived Boxes
+
+- `/charly-languages:python-ml` — ML Python environment
+- `/charly-jupyter:jupyter` — Jupyter notebook server
+- `/charly-ollama:ollama` — LLM inference server
+- `/charly-comfyui:comfyui` — image generation UI
+
+## Related Boxes
+
+- `/charly-distros:fedora` — parent base (no GPU)
+- `/charly-distros:cachyos` — `cachyos.nvidia` is the CachyOS GPU-base sibling (Arch/CachyOS GPU stack)
+- `/charly-coder:charly-arch` — Arch Linux charly toolchain with nvidia (shared candies)
+- `/charly-distros:charly-fedora` — Fedora charly toolchain with nvidia (shared candies)
+
+## Verification
+
+After `charly box build`:
+- `charly shell nvidia -c "nvidia-smi"` — GPU info
+- `charly shell nvidia -c "nvidia-ctk --version"` — CDI toolkit
+- `charly shell nvidia -c "nvcc --version"` — CUDA compiler
+
+## When to Use This Skill
+
+**MUST be invoked** when the task involves the nvidia box, GPU base images, CUDA in containers, or CDI device configuration. Invoke this skill BEFORE reading source code or launching Explore agents.
+
+## Related
+
+- `/charly-image:image` — image family umbrella (`candy:` image entries — those carrying `base:`/`from:` — in `charly.yml`, build/validate/inspect/list)
+- `/charly-build:build` — the embedded build vocabulary (distros, builders, init-systems)

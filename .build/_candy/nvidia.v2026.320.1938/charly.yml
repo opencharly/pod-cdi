@@ -1,0 +1,759 @@
+import:
+    - arch: "@github.com/opencharly/distro-arch:v2026.290.1914"
+discover:
+    - path: box
+      recursive: true
+
+nvidia:
+    candy:
+        description: |
+            NVIDIA GPU runtime — nvidia-container-toolkit (nvidia-ctk CDI) plus the driver-lib path and Vulkan ICD wiring
+            Installs nvidia-container-toolkit (the nvidia-ctk CLI that generates
+            CDI device specs) alongside the per-distro driver libs (nvidia-utils
+            on Arch, libva-nvidia-driver on Fedora). Exports
+            LD_LIBRARY_PATH=/usr/lib64 so the GPU driver libraries resolve, and
+            prepares /etc/vulkan/icd.d to hold the nvidia Vulkan ICD symlinks.
+            Every effect — the package, the nvidia-ctk binary, the exported path,
+            and the ICD directory — is a real artifact baked into the image, so
+            each is directly verifiable without a physical GPU.
+        package:
+            - nvidia-container-toolkit
+        distro:
+            arch:
+                package:
+                    - nvidia-utils
+            omarchy:
+                package:
+                    - nvidia-utils
+            fedora:
+                package:
+                    - libva-nvidia-driver
+                repo:
+                    # negativo17 fedora-multimedia provides the driver libs (libva-nvidia-driver)
+                    # but NOT nvidia-container-toolkit; that lives ONLY in NVIDIA's own
+                    # libnvidia-container repo (RDD-confirmed on fedora:43:
+                    # negativo17 → "No matching packages"; NVIDIA repo → installs 1.19.1).
+                    - name: fedora-multimedia
+                      url: "https://negativo17.org/repos/fedora-multimedia.repo"
+                      gpgkey: "https://negativo17.org/repos/RPM-GPG-KEY-slaanesh"
+                    # NVIDIA ships this repo file with gpgcheck=0 — the only repo in the
+                    # tree that does — so its 4 packages (a container runtime hook) were
+                    # installing UNVERIFIED even though the gpgkey below imports fine and
+                    # every one of them is validly signed by the primary key. gpgcheck: true
+                    # forces the check back on; before the tri-state knob existed the
+                    # `gpgcheck:` field could only ever weaken a vendor's policy, so there
+                    # was no value expressible here that fixed it.
+                    # No gpgkey: here ON PURPOSE. The repo file already declares the same
+                    # key, so dnf5 imports it itself under gpgcheck=1 — whereas an explicit
+                    # `rpm --import` of NVIDIA's published certificate emits
+                    # "Subkey 6ED91CA3AC1160CD is expired" on every build, because that
+                    # certificate carries a subkey that died 2021-06-16 and every NVIDIA
+                    # copy of it still ships the dead subkey. Nothing is trusted less: the
+                    # packages are signed by the PRIMARY key and are verified either way.
+                    - name: nvidia-container-toolkit
+                      url: "https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo"
+                      gpgcheck: true
+        env:
+            LD_LIBRARY_PATH: "/usr/lib64"
+        plan:
+            - run: mkdir=/etc/vulkan/icd.d
+              mkdir: /etc/vulkan/icd.d
+              run_as: root
+            - run: |
+                command=[ -f /usr/share/vulkan/icd.d/nvidia_icd.x86_64.json ] && \
+                  ln -sf /usr/share/vulkan/icd.d/nvidia_icd.x86_64.json /etc/vulkan/icd.d/nvidia_icd.json || true
+                [ -f /usr/share/vulkan/implicit_layer.d/nvidia_layers.json ] && \
+                  ln -sf /usr/share/vulkan/implicit_layer.d/nvidia_layers.json /etc/vulkan/icd.d/nvidia_layers.json || true
+              run_as: root
+              command: |
+                # BOTH filenames: Arch/CachyOS ship /usr/share/vulkan/icd.d/nvidia_icd.json,
+                # Fedora's package ships nvidia_icd.x86_64.json. Testing only the Fedora
+                # name made this step a silent no-op on Arch -- measured on a cachyos image:
+                # `ls /usr/share/vulkan/icd.d/` -> nvidia_icd.json, and /etc/vulkan/icd.d/
+                # carried no image-side link.
+                icd=
+                for c in /usr/share/vulkan/icd.d/nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.x86_64.json; do
+                  if [ -f "$c" ]; then icd="$c"; break; fi
+                done
+                if [ -n "$icd" ]; then
+                  ln -sf "$icd" /etc/vulkan/icd.d/nvidia_icd.json
+                  echo "wired Vulkan ICD: $icd"
+                else
+                  echo "no Vulkan ICD JSON in the package set for this distro"
+                fi
+                [ -f /usr/share/vulkan/implicit_layer.d/nvidia_layers.json ] && \
+                  ln -sf /usr/share/vulkan/implicit_layer.d/nvidia_layers.json /etc/vulkan/icd.d/nvidia_layers.json || true
+                true
+
+            # ── THE DOCUMENTED CONTRACT, ENFORCED ON THE ARCH ARMS ──────────────
+            # This candy's own skill states the rule: "Driver userspace libraries
+            # (libcuda, libnvidia-ml, etc.) are NOT bundled -- CDI provides
+            # host-matching driver libs at runtime, preventing version mismatches
+            # between container and host kernel module." The FEDORA arm obeys it
+            # (libva-nvidia-driver ships no driver libs). The ARCH arm did not:
+            # `nvidia-utils` installs the whole driver user-space (89 files under
+            # /usr/lib), and NVIDIA's CDI `create-symlinks` hook points each SONAME at
+            # the NEWEST versioned copy present INSIDE the container -- so the image's
+            # copy beat the injected host copy. Measured on a cachyos ollama image
+            # against a 615.78.08 host:
+            #   /usr/lib/libnvidia-ml.so.1 -> libnvidia-ml.so.620.70.06     (image)
+            #   /usr/lib/libnvidia-ml.so.615.78.08                          (CDI mount)
+            #   $ nvidia-smi -L
+            #   Failed to initialize NVML: Driver/library version mismatch
+            #   NVML library version: 620.70                                (exit 18)
+            # CUDA still ran -- the injected libcuda is fine -- so the failure surfaces
+            # only in NVML, i.e. `nvidia-smi` and every Vulkan/EGL consumer, on a host
+            # whose kernel driver is older than the distro's package.
+            #
+            # The package STAYS installed: it also owns assets that are NOT
+            # host-coupled and that this candy actually uses -- the Vulkan ICD JSON the
+            # step above wires, and the nvidia-smi binary (which CDI also injects).
+            # Only the host-coupled driver user-space is removed, which is what makes
+            # the skill's sentence true on both arms.
+            - run: drop the host-coupled driver user-space nvidia-utils ships, so the CDI mount is its ONLY provider
+              id: nvidia-drop-driver-userspace
+              run_as: root
+              command: |
+                set -eu
+                # Patterns == the libs the NVIDIA CDI spec injects (its own /usr/lib
+                # containerPaths): everything matching is host-coupled by definition.
+                # A symlinked /usr/lib64 (Arch) is skipped so nothing is counted or
+                # deleted twice.
+                removed=0
+                for d in /usr/lib /usr/lib64; do
+                  if [ ! -d "$d" ] || [ -L "$d" ]; then continue; fi
+                  out=$(find "$d" -maxdepth 1 \( -name 'libnvidia-*.so*' -o -name 'libcuda*.so*' \
+                        -o -name 'libnvcuvid.so*' -o -name 'libnvoptix.so*' -o -name 'libGLX_nvidia.so*' \
+                        -o -name 'libEGL_nvidia.so*' -o -name 'libGLESv1_CM_nvidia.so*' \
+                        -o -name 'libGLESv2_nvidia.so*' \) -print -delete 2>/dev/null || true)
+                  n=$(printf '%s\n' "$out" | grep -c . || true)
+                  removed=$((removed + n))
+                done
+                rm -rf /usr/lib/nvidia /usr/lib/vdpau /usr/lib/xorg/modules/drivers/nvidia_drv.so
+                echo "dropped $removed driver library file(s) plus the xorg/vdpau driver trees"
+                # THE ENFORCEMENT, and it lives HERE rather than in a `check:` step on
+                # purpose. This RUN executes in the build container, where no CDI has
+                # injected anything -- so every match below IS image content, with no
+                # ambiguity. A `check:` step runs in a container the GPU seam may attach,
+                # where the host's identical-version libs sit at the same paths, and the
+                # only way to tell them apart from baked ones is /proc/self/mountinfo --
+                # which is not readable on every venue (measured: the probe went red on a
+                # CORRECT fedora image for exactly that reason). A control that has to
+                # guess is worse than a control that cannot be fooled.
+                # \-type f OR \-type l: the failure this replaced was a SYMLINK
+                # (libnvidia-ml.so.1 -> libnvidia-ml.so.620.70.06), so a files-only count
+                # would let the exact bug class walk back in. The delete above has no
+                # -type restriction, so the two sets match.
+                left=$(find /usr/lib /usr/lib64 -maxdepth 1 \( -type f -o -type l \) \
+                    \( -name 'libnvidia-*.so*' -o -name 'libcuda*.so*' -o -name 'libnvcuvid.so*' \
+                    -o -name 'libnvoptix.so*' -o -name 'libGLX_nvidia.so*' -o -name 'libEGL_nvidia.so*' \
+                    -o -name 'libGLESv1_CM_nvidia.so*' -o -name 'libGLESv2_nvidia.so*' \) 2>/dev/null | wc -l)
+                echo "driver library files still baked after the strip: $left"
+                if [ "$left" -ne 0 ]; then
+                  find /usr/lib /usr/lib64 -maxdepth 1 -type f -name 'libnvidia-*.so*' 2>/dev/null | head -5
+                  echo "a LATER layer re-introduced a host-coupled driver library; strip it in that candy's own plan too"
+                  exit 1
+                fi
+            # THE coverage for the gpgcheck fix, and it reads the one observable that
+            # DISCRIMINATES. Two wrong candidates, both ruled out by experiment:
+            #   - "the signing key is in the rpmdb" does NOT discriminate — the previous
+            #     code imported the key explicitly via `rpm --import` while still
+            #     installing unverified under NVIDIA's shipped gpgcheck=0, so the key was
+            #     present either way.
+            #   - the vendor .repo file does NOT change — `dnf5 config-manager setopt`
+            #     never rewrites it; /etc/yum.repos.d/nvidia-container-toolkit.repo still
+            #     reads gpgcheck=0 in the built image.
+            # setopt persists into /etc/dnf/repos.override.d/99-config_manager.repo, which
+            # overrides the vendor file and DOES survive into the image. The awk pulls just
+            # this repo's section, because that file also carries other repos' setopts.
+            # Revert `gpgcheck: true` above (or the template's `true` arm) and it fails.
+            - check: the nvidia-container-toolkit repo enforces package signature verification, so its packages cannot install unverified
+              id: nvidia-container-toolkit-gpgcheck-enforced
+              # Fedora-scoped, implemented IN THE COMMAND (runner-level exclude-distro is not honoured).
+              #
+              # The assertion used to live in a `stdout:` matcher while the Arch skip path merely exited
+              # 0. On the Arch arm the command therefore succeeded, printed nothing, and the matcher still
+              # demanded "gpgcheck=1" -- a red check on an arm where that fact cannot hold by construction.
+              # Measured on cachyos: `stdout: expected to contain "gpgcheck=1" (got: )`.
+              #
+              # The assertion now lives where the distro decision is made, and the matcher is gone: on
+              # Fedora the repo section must carry gpgcheck=1 or the step FAILS; on the Arch-family arms
+              # there is no DNF repo to check, so it exits 0 honestly instead of printing a string it did
+              # not verify (which would be a vacuous probe).
+              command: |
+                set -eu
+                # Skip by DISTRO, never by file presence. "the override file is absent" is true on the
+                # Arch arms but ALSO on a Fedora where the override was never written -- and there a
+                # missing override leaves NVIDIA's vendor gpgcheck=0 repo in force, which is exactly what
+                # this check exists to catch. A file-presence proxy for "Arch" made that Fedora a
+                # false-green. So:
+                #   * no DNF at all (arch/cachyos/omarchy)      -> exit 0: nothing to assert, honestly;
+                #   * a DNF host whose override file is MISSING -> FAIL: the vendor gpgcheck=0 repo stands;
+                #   * a DNF host whose section lacks gpgcheck=1 -> FAIL.
+                # The section is extracted ONCE and reused for the assertion and the message.
+                # "no DNF at all" means no dnf TOOLING -- not "neither directory exists". Arch-family
+                # arms have no /etc/dnf, but /etc/yum.repos.d can exist there (an unrelated package may
+                # create it), and testing both directories made the guard `true && false` = false, so
+                # the arm fell through to the Fedora assertion and FAILED on a DNF repo it does not have.
+                # Measured: cachyos failed here with the pre-#12 content gone and this guard in place.
+                if ! command -v dnf >/dev/null 2>&1 && [ ! -e /etc/dnf ]; then
+                  exit 0
+                fi
+                f=/etc/dnf/repos.override.d/99-config_manager.repo
+                section=$(awk '/^\[nvidia-container-toolkit\]/{x=1;next} /^\[/{x=0} x' "$f" 2>/dev/null || true)
+                printf '%s\n' "$section" | grep -q 'gpgcheck=1' || {
+                  echo "the nvidia-container-toolkit repo does not enforce gpgcheck=1 on this DNF host"
+                  echo "  file: $f"
+                  echo "  section: ${section:-<absent>}"
+                  exit 1
+                }
+            - check: the nvidia-container-toolkit package is installed for CDI device generation
+              package:
+                package: nvidia-container-toolkit
+                installed: true
+            - check: the nvidia-ctk CLI binary lands on the canonical /usr/bin path
+              file:
+                file: /usr/bin/nvidia-ctk
+                exists: true
+            - check: nvidia-ctk runs and reports a version number
+              exit_status: 0
+              stdout:
+                - matches: "[0-9]+\\.[0-9]+"
+              command: nvidia-ctk --version
+            - check: the Vulkan ICD directory exists to hold the nvidia ICD symlinks
+              file:
+                file: /etc/vulkan/icd.d
+                exists: true
+                filetype: directory
+            - check: the NVIDIA runtime asset THIS distro provides is present (Vulkan ICD JSON on Arch, VA-API driver on Fedora)
+              id: nvidia-distro-runtime-assets
+              exit_status: 0
+              command: |
+                set -eu
+                # Rewritten WITH the driver-user-space strip, because the old form of this
+                # check asserted the very thing the contract forbids: it ran
+                #   ls -d /usr/lib64/nvidia /usr/lib/nvidia /usr/lib64/libnvidia* /usr/lib/libnvidia* ...
+                # and required "nvidia" in the output, i.e. it demanded that the host-coupled
+                # driver libraries BE baked into the image. Once the strip landed it went red
+                # on a correct image: `stdout: expected to contain "nvidia" (got: )`
+                # (measured on check-cachyos-ollama-pod, plan:candy:...:8).
+                #
+                # It now asserts the DISTRO'S OWN asset STRICTLY -- an any-of over the three
+                # candidates would pass an Arch image that is missing the Vulkan ICD it is
+                # supposed to wire, simply because nvidia-smi happened to be there.
+                #   * Arch / CachyOS / Omarchy: the Vulkan ICD JSON the wiring step links;
+                #   * Fedora:                    the VA-API driver from libva-nvidia-driver.
+                # The distro is decided by the presence of DNF tooling, the same guard the
+                # gpgcheck probe below uses ("no DNF at all" == the Arch-family arms).
+                if command -v dnf >/dev/null 2>&1 || [ -e /etc/dnf ]; then
+                  if [ ! -f /usr/lib64/dri/nvidia_drv_video.so ] && [ ! -f /usr/lib/dri/nvidia_drv_video.so ]; then
+                    echo "fedora: the VA-API driver from libva-nvidia-driver is MISSING"
+                    exit 1
+                  fi
+                  echo "fedora: VA-API driver present"
+                else
+                  # Arch/CachyOS ship nvidia_icd.json; Fedora's package the .x86_64 name.
+                  # A glob over both is the assertion; naming only one made this check fail
+                  # on a correct cachyos image (measured).
+                  found=
+                  for c in /usr/share/vulkan/icd.d/nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.x86_64.json; do
+                    if [ -f "$c" ]; then found="$c"; fi
+                  done
+                  if [ -z "$found" ]; then
+                    echo "arch: the Vulkan ICD JSON is MISSING"
+                    exit 1
+                  fi
+                  echo "arch: Vulkan ICD JSON present ($found)"
+                fi
+                # SCOPE: this step asserts PRESENCE of the distro asset only. The ABSENCE of
+                # the host-coupled driver libraries is asserted by the strip step's own
+                # build-time count, not here -- at run time CDI injects the host's libs at the
+                # same paths, so absence is not observable from inside a GPU-enabled container
+                # (see the strip step's comment).
+                # nvidia-smi is a convenience binary the image keeps (CDI injects its own at
+                # run time); reported, not required, because the Fedora arm does not ship it.
+                command -v nvidia-smi >/dev/null 2>&1 && echo "nvidia-smi present" || echo "nvidia-smi absent (injected by CDI at run time)"
+
+nvidia-cdi-host:
+    candy:
+        description: |
+            NVIDIA CDI host layer — the containerd nvidia handler, a durable CDI spec, and the rootless client path
+            Composes the nvidia candy and configures containerd for CDI:
+            nvidia-ctk runtime configure --runtime=containerd (NO --enable-cdi — the
+            key is ignored on containerd 2.x and emits a warning — and no
+            --set-as-default) writes a drop-in at the layer-owned
+            /etc/containerd/conf.d/99-nvidia.toml and records that directory in
+            config.toml's imports, so a default drop-in path refused as permission
+            denied cannot leave a host silently unconfigured. Restarts containerd so
+            the handler is SERVED, not merely written — containerd reads its config and
+            drop-ins at startup. Enables and starts the toolkit's nvidia-cdi-refresh.path
+            and .service so /var/run/cdi/nvidia.yaml is regenerated at boot, on module
+            load and when the toolkit changes, and exists on a fresh host before the
+            checks run — a one-shot generate into /etc/cdi is a snapshot that goes stale
+            on the first driver upgrade. Links the refreshed spec into the rootless
+            client's config dir (the user's $XDG_CONFIG_HOME/cdi, default
+            ~/.config/cdi -> /var/run/cdi/nvidia.yaml), because the rootless spec dirs
+            are $XDG_CONFIG_HOME/cdi and $XDG_RUNTIME_DIR/cdi, never /etc/cdi. The
+            checks gate on the DEVICE: crictl info serves the nvidia handler and
+            nvidia-ctk cdi list reports nvidia.com/gpu=all; an exit code is not evidence
+            because cdi list exits 0 on an invalid spec.
+            Arch/omarchy only: a Fedora arm is additive and is not claimed until its
+            own disposable bed exists (CONTAINERD-IMAGES.md §1).
+        candy:
+            - nvidia
+        distro:
+            arch:
+                package:
+                    - containerd
+                    - cri-tools
+                    - nerdctl
+            omarchy:
+                package:
+                    - containerd
+                    - cri-tools
+                    - nerdctl
+        plan:
+            - run: configure containerd's nvidia runtime handler with a drop-in this layer owns
+              id: nvidia-handler-configure
+              run_as: root
+              command: |
+                set -eu
+                conf=/etc/containerd/config.toml
+                dropin=/etc/containerd/conf.d/99-nvidia.toml
+                [ -f "$conf" ] || { echo "containerd config not found: $conf" >&2; exit 1; }
+                install -d -m 0755 /etc/containerd/conf.d
+                # NO --enable-cdi: CDI is always on in containerd 2.x and the key is
+                # ignored with a warning. NO --set-as-default: the handler is selected
+                # per pod or per container. --drop-in-config names the path this layer
+                # owns, so a default path refused as permission denied cannot leave the
+                # host in the silently-unconfigured state the command otherwise reports
+                # as success.
+                nvidia-ctk runtime configure --runtime=containerd --config "$conf" --drop-in-config "$dropin"
+                grep -q 'runtimes\.nvidia' "$dropin"
+                grep -q 'BinaryName = "/usr/bin/nvidia-container-runtime"' "$dropin"
+                grep -Fq '/etc/containerd/conf.d/*.toml' "$conf"
+                if grep -q 'enable_cdi' "$dropin"; then
+                  echo "the drop-in carries the enable_cdi key containerd 2.x ignores" >&2
+                  exit 1
+                fi
+            - run: restart containerd so the new handler is served, not merely written
+              id: nvidia-handler-reload
+              run_as: root
+              command: |
+                set -eu
+                # containerd reads its config and drop-ins at startup; a drop-in written
+                # while the daemon runs is not served (measured on a scratch daemon:
+                # 0 nvidia runtimes after the write, 2 after a restart). In a container
+                # build there is no daemon to restart; the deployed host always has one.
+                if [ -d /run/systemd/system ]; then
+                  systemctl restart containerd
+                fi
+            - run: enable and start the toolkit's CDI refresh path and service
+              id: nvidia-cdi-refresh-enable
+              run_as: root
+              command: |
+                set -eu
+                systemctl cat nvidia-cdi-refresh.path >/dev/null
+                systemctl cat nvidia-cdi-refresh.service >/dev/null
+                systemctl enable nvidia-cdi-refresh.path nvidia-cdi-refresh.service
+                # Enabling is a boot-time promise; starting it now is what makes
+                # /var/run/cdi/nvidia.yaml exist on a fresh host before the checks run.
+                if [ -d /run/systemd/system ]; then
+                  systemctl start nvidia-cdi-refresh.path
+                  systemctl start nvidia-cdi-refresh.service
+                fi
+            - run: write the rootless CDI link helper
+              id: nvidia-cdi-rootless-link-helper
+              write: /usr/local/bin/nvidia-cdi-rootless-link
+              mode: "0755"
+              run_as: root
+              content: |
+                #!/bin/sh
+                # ONE implementation of the rootless CDI spec link. The rootless client
+                # resolves CDI on its own side: its spec dirs are $XDG_CONFIG_HOME/cdi
+                # and $XDG_RUNTIME_DIR/cdi, never /etc/cdi. Resolve the user's
+                # XDG_CONFIG_HOME from their login environment, fall back to the client's
+                # documented default, and link the REFRESHED file, never a snapshot.
+                # usage: nvidia-cdi-rootless-link <create|check> <uid>
+                set -eu
+                mode=$1
+                uid=$2
+                u=$(getent passwd "$uid" | cut -d: -f1)
+                h=$(getent passwd "$uid" | cut -d: -f6)
+                xdg=$(runuser -u "$u" -- sh -lc 'printf %s "$XDG_CONFIG_HOME"' 2>/dev/null || true)
+                case "$xdg" in
+                  /*) ;;
+                  *) xdg=$h/.config ;;
+                esac
+                link=$xdg/cdi/nvidia.yaml
+                if [ "$mode" = create ]; then
+                  [ -d "$xdg" ] || install -d -o "$u" -g "$u" -m 0700 "$xdg"
+                  [ -d "$xdg/cdi" ] || install -d -o "$u" -g "$u" -m 0755 "$xdg/cdi"
+                  ln -sfn /var/run/cdi/nvidia.yaml "$link"
+                  chown -h "$u:$u" "$link"
+                fi
+                test "$(readlink "$link")" = /var/run/cdi/nvidia.yaml
+                printf '%s\n' "$link"
+            - run: link the refreshed CDI spec into the rootless client's config dir
+              id: nvidia-cdi-rootless-link
+              run_as: root
+              command: |
+                set -eu
+                # The rule is the mechanism for a user that does not exist yet; the
+                # client default is %h/.config because systemd-tmpfiles carries no
+                # XDG_CONFIG_HOME specifier. When a user exists the helper resolves the
+                # user's own XDG_CONFIG_HOME and creates the link eagerly.
+                install -d -m 0755 /etc/user-tmpfiles.d
+                printf '%s\n' 'L+ %h/.config/cdi/nvidia.yaml - - - - /var/run/cdi/nvidia.yaml' > /etc/user-tmpfiles.d/nvidia-cdi.conf
+                uid=$(getent passwd 1000 >/dev/null 2>&1 && echo 1000 || true)
+                if [ -z "$uid" ]; then
+                  uid=$(awk -F: '$3>=1000 && $3<65534 {print $3; exit}' /etc/passwd)
+                fi
+                if [ -z "$uid" ]; then
+                  echo "no user account yet; the user-tmpfiles rule creates the client-default link at first login"
+                  exit 0
+                fi
+                /usr/local/bin/nvidia-cdi-rootless-link create "$uid"
+            - check: the containerd drop-in registers the nvidia runtime handler
+              id: nvidia-handler-dropin
+              exit_status: 0
+              stdout:
+                - contains: HANDLER-DROPIN-OK
+              command: |
+                set -eu
+                f=/etc/containerd/conf.d/99-nvidia.toml
+                grep -q 'runtimes\.nvidia' "$f"
+                grep -q 'BinaryName = "/usr/bin/nvidia-container-runtime"' "$f"
+                echo HANDLER-DROPIN-OK
+            - check: the drop-in does not carry the enable_cdi key containerd 2.x ignores
+              id: nvidia-dropin-no-enable-cdi
+              exit_status: 0
+              stdout:
+                - contains: NO-ENABLE-CDI-OK
+              command: |
+                set -eu
+                if grep -q 'enable_cdi' /etc/containerd/conf.d/99-nvidia.toml; then
+                  echo "enable_cdi is present; containerd 2.x ignores it" >&2
+                  exit 1
+                fi
+                echo NO-ENABLE-CDI-OK
+            - check: containerd's config imports the drop-in directory
+              id: nvidia-imports
+              exit_status: 0
+              stdout:
+                - contains: IMPORTS-OK
+              command: |
+                set -eu
+                grep -Fq '/etc/containerd/conf.d/*.toml' /etc/containerd/config.toml
+                echo IMPORTS-OK
+            - check: the CDI refresh path and service are enabled so the spec is regenerated, not snapshotted
+              id: nvidia-refresh-enabled
+              exit_status: 0
+              stdout:
+                - contains: REFRESH-UNITS-OK
+              command: |
+                set -eu
+                test -L /etc/systemd/system/multi-user.target.wants/nvidia-cdi-refresh.path
+                test -L /etc/systemd/system/multi-user.target.wants/nvidia-cdi-refresh.service
+                echo REFRESH-UNITS-OK
+            - check: the rootless client's CDI spec link targets the refreshed spec
+              id: nvidia-rootless-link
+              exit_status: 0
+              command: |
+                set -eu
+                test -f /etc/user-tmpfiles.d/nvidia-cdi.conf
+                grep -Fq 'L+ %h/.config/cdi/nvidia.yaml - - - - /var/run/cdi/nvidia.yaml' /etc/user-tmpfiles.d/nvidia-cdi.conf
+                uid=$(getent passwd 1000 >/dev/null 2>&1 && echo 1000 || true)
+                if [ -z "$uid" ]; then
+                  uid=$(awk -F: '$3>=1000 && $3<65534 {print $3; exit}' /etc/passwd)
+                fi
+                test -x /usr/local/bin/nvidia-cdi-rootless-link
+                if [ -z "$uid" ]; then
+                  echo "ROOTLESS-LINK-RULE-OK"
+                  exit 0
+                fi
+                sudo -n /usr/local/bin/nvidia-cdi-rootless-link check "$uid"
+                echo ROOTLESS-LINK-OK
+            - check: nvidia-ctk cdi list reports the nvidia.com/gpu=all device
+              id: nvidia-cdi-device-lists
+              context:
+                - runtime
+              exit_status: 0
+              stdout:
+                - contains: nvidia.com/gpu=all
+              command:
+                command: nvidia-ctk cdi list
+                in_container: false
+            - check: crictl info serves the nvidia runtime handler
+              id: nvidia-handler-live
+              context:
+                - runtime
+              exit_status: 0
+              stdout:
+                - contains: '"nvidia"'
+              command:
+                command: |
+                  set -eu
+                  sudo -n crictl --runtime-endpoint unix:///run/containerd/containerd.sock --image-endpoint unix:///run/containerd/containerd.sock info
+                in_container: false
+            - check: a rootful CDI injection runs nvidia-smi -L through nvidia.com/gpu=all
+              id: nvidia-injection-rootful
+              context:
+                - runtime
+              timeout: 900s
+              exit_status: 0
+              stdout:
+                - contains: NVIDIA
+              command:
+                command: |
+                  set -eu
+                  sudo -n nerdctl --namespace default run --rm --device nvidia.com/gpu=all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi -L
+                in_container: false
+            - check: the rootless client resolves the same device through the linked refreshed spec
+              id: nvidia-rootless-device
+              context:
+                - runtime
+              exit_status: 0
+              command:
+                command: |
+                  set -eu
+                  uid=$(getent passwd 1000 >/dev/null 2>&1 && echo 1000 || true)
+                  if [ -z "$uid" ]; then
+                    uid=$(awk -F: '$3>=1000 && $3<65534 {print $3; exit}' /etc/passwd)
+                  fi
+                  if [ -z "$uid" ]; then
+                    echo "ROOTLESS-DEVICE-RULE-OK: no user yet; the user-tmpfiles rule creates the client-default link at first login"
+                    exit 0
+                  fi
+                  u=$(getent passwd "$uid" | cut -d: -f1)
+                  out=$(sudo -n runuser -u "$u" -- nvidia-ctk cdi list)
+                  printf '%s\n' "$out"
+                  printf '%s\n' "$out" | grep -q 'nvidia.com/gpu=all'
+                  echo ROOTLESS-DEVICE-OK
+                in_container: false
+
+nvidia-cdi-host-probe:
+    local:
+        description: >-
+            Local template that applies the nvidia-cdi-host layer to a GPU host — the
+            template the check-nvidia-cdi-host bed deploys.
+        candy:
+            - nvidia-cdi-host
+
+check-nvidia-cdi-host:
+    local:
+        from: nvidia-cdi-host-probe
+        host: local
+        disposable: true
+        lifecycle: dev
+        requires_shared: [nvidia-gpu]
+        description: >-
+            The nvidia-cdi-host acceptance bed: absence, perform, presence, on a GPU
+            host. Step 1 starts a SCRATCH containerd (own root, state and socket) with
+            no nvidia handler and an empty spec dir, and asserts neither the handler nor
+            the device is present. Step 2 runs the layer's own configure command against
+            that scratch config. Step 3 asserts crictl info serves the nvidia handler,
+            nvidia-ctk cdi list reports nvidia.com/gpu=all, and a rootful CDI injection
+            runs nvidia-smi -L. Step 4 does the same rootless through a scratch rootless
+            containerd and the linked refreshed spec. Step 5 checks the deployed layer's
+            artifacts. The host's /run/containerd socket and its CDI specs are read
+            only: every daemon is on its own scratch socket. On a host without the
+            claimed GPU the bed skips visibly with prereq-gpu-skipped, never passes.
+            The data-producing steps were executed individually against scratch daemons
+            on the RTX 4080 SUPER host; a full charly check run on a DISPOSABLE GPU host
+            is the remaining gate and is not claimed by this change.
+        install_opts:
+            with_service: true
+            allow_root_tasks: true
+        plan:
+            - check: absence — a scratch containerd with no nvidia handler serves no nvidia runtime and an empty spec dir lists no device
+              id: nvidia-cdi-absent-before
+              context:
+                - runtime
+              timeout: 300s
+              exit_status: 0
+              stdout:
+                - contains: CDI-ABSENT-BEFORE
+              command:
+                command: |
+                  set -eu
+                  d=/tmp/nvidia-cdi-bed
+                  rm -rf "$d"
+                  mkdir -p "$d/conf.d" "$d/other" "$d/root" "$d/state" "$d/specs"
+                  cat > "$d/config.toml" <<EOF
+                  version = 4
+                  root = "$d/root"
+                  state = "$d/state"
+                  imports = ["$d/other/*.toml"]
+                  [plugins."io.containerd.grpc.v1.cri"]
+                    [plugins."io.containerd.grpc.v1.cri".containerd]
+                      default_runtime_name = "runc"
+                  EOF
+                  sudo -n containerd --config "$d/config.toml" --address "$d/containerd.sock" --log-level error >"$d/daemon.log" 2>&1 &
+                  echo $! > "$d/pid"
+                  trap 'sudo -n kill "$(cat "$d/pid")" 2>/dev/null || true' EXIT
+                  ready=0
+                  for i in $(seq 1 100); do
+                    if sudo -n crictl --runtime-endpoint "unix://$d/containerd.sock" --image-endpoint "unix://$d/containerd.sock" info > "$d/info-before.json" 2>/dev/null; then ready=1; break; fi
+                    sleep 0.1
+                  done
+                  [ "$ready" = 1 ] || { echo "scratch containerd did not become ready" >&2; cat "$d/daemon.log" >&2; exit 1; }
+                  sudo -n kill "$(cat "$d/pid")" || true
+                  if grep -q '"nvidia"' "$d/info-before.json"; then
+                    echo "the nvidia handler is already served before the change" >&2
+                    exit 1
+                  fi
+                  nvidia-ctk cdi list --spec-dir "$d/specs" > "$d/list-before.txt" 2>&1 || true
+                  if grep -q 'nvidia.com/gpu=all' "$d/list-before.txt"; then
+                    echo "the device is already listed from an empty spec dir" >&2
+                    exit 1
+                  fi
+                  echo CDI-ABSENT-BEFORE
+                in_container: false
+            - check: perform — the layer's configure command writes the handler drop-in into the scratch containerd config
+              id: nvidia-cdi-perform
+              context:
+                - runtime
+              timeout: 300s
+              exit_status: 0
+              stdout:
+                - contains: CDI-PERFORM-OK
+              command:
+                command: |
+                  set -eu
+                  d=/tmp/nvidia-cdi-bed
+                  test -f "$d/config.toml"
+                  nvidia-ctk runtime configure --runtime=containerd --config "$d/config.toml" --drop-in-config "$d/conf.d/99-nvidia.toml"
+                  grep -q 'runtimes\.nvidia' "$d/conf.d/99-nvidia.toml"
+                  grep -q 'BinaryName = "/usr/bin/nvidia-container-runtime"' "$d/conf.d/99-nvidia.toml"
+                  grep -Fq "$d/conf.d/*.toml" "$d/config.toml"
+                  if grep -q 'enable_cdi' "$d/conf.d/99-nvidia.toml"; then
+                    echo "enable_cdi must not be written on containerd 2.x" >&2
+                    exit 1
+                  fi
+                  echo CDI-PERFORM-OK
+                in_container: false
+            - check: presence — crictl info serves the nvidia handler, the device lists, and a rootful CDI injection runs nvidia-smi -L
+              id: nvidia-cdi-present-rootful
+              context:
+                - runtime
+              timeout: 900s
+              exit_status: 0
+              stdout:
+                - contains: CDI-PRESENT-ROOTFUL
+              command:
+                command: |
+                  set -eu
+                  d=/tmp/nvidia-cdi-bed
+                  sudo -n containerd --config "$d/config.toml" --address "$d/containerd.sock" --log-level error >"$d/daemon.log" 2>&1 &
+                  echo $! > "$d/pid"
+                  trap 'sudo -n kill "$(cat "$d/pid")" 2>/dev/null || true' EXIT
+                  ready=0
+                  for i in $(seq 1 100); do
+                    if sudo -n crictl --runtime-endpoint "unix://$d/containerd.sock" --image-endpoint "unix://$d/containerd.sock" info > "$d/info-after.json" 2>/dev/null; then ready=1; break; fi
+                    sleep 0.1
+                  done
+                  [ "$ready" = 1 ] || { echo "scratch containerd did not become ready" >&2; cat "$d/daemon.log" >&2; exit 1; }
+                  grep -q '"nvidia"' "$d/info-after.json"
+                  nvidia-ctk cdi list > "$d/list-after.txt" 2>&1
+                  grep -q 'nvidia.com/gpu=all' "$d/list-after.txt"
+                  out=$(sudo -n nerdctl --address "$d/containerd.sock" --namespace default run --rm --device nvidia.com/gpu=all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi -L 2>&1)
+                  printf '%s\n' "$out"
+                  printf '%s\n' "$out" | grep -q 'NVIDIA GeForce'
+                  sudo -n kill "$(cat "$d/pid")" || true
+                  echo CDI-PRESENT-ROOTFUL
+                in_container: false
+            - check: presence — the rootless client resolves the linked refreshed spec and a rootless CDI injection runs nvidia-smi -L
+              id: nvidia-cdi-present-rootless
+              context:
+                - runtime
+              timeout: 900s
+              exit_status: 0
+              stdout:
+                - contains: CDI-PRESENT-ROOTLESS
+              command:
+                command: |
+                  set -eu
+                  d=/tmp/nvidia-cdi-bed-rootless
+                  rm -rf "$d"
+                  mkdir -p "$d/xdg" "$d/home/.config/cdi"
+                  chmod 700 "$d/xdg"
+                  ln -sfn /var/run/cdi/nvidia.yaml "$d/home/.config/cdi/nvidia.yaml"
+                  test "$(readlink "$d/home/.config/cdi/nvidia.yaml")" = /var/run/cdi/nvidia.yaml
+                  XDG_RUNTIME_DIR="$d/xdg" HOME="$d/home" containerd-rootless.sh --root "$d/root" --state "$d/state" --address "$d/containerd.sock" --log-level error >"$d/daemon.log" 2>&1 &
+                  echo $! > "$d/pid"
+                  trap 'kill "$(cat "$d/pid")" 2>/dev/null || true' EXIT
+                  ready=0
+                  for i in $(seq 1 200); do
+                    if XDG_RUNTIME_DIR="$d/xdg" HOME="$d/home" nerdctl --address "$d/containerd.sock" info >/dev/null 2>&1; then ready=1; break; fi
+                    sleep 0.1
+                  done
+                  [ "$ready" = 1 ] || { echo "scratch rootless containerd did not become ready" >&2; cat "$d/daemon.log" >&2; exit 1; }
+                  out=$(XDG_RUNTIME_DIR="$d/xdg" HOME="$d/home" nerdctl --address "$d/containerd.sock" --namespace default run --rm --device nvidia.com/gpu=all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi -L 2>&1)
+                  printf '%s\n' "$out"
+                  printf '%s\n' "$out" | grep -q 'NVIDIA GeForce'
+                  kill "$(cat "$d/pid")" || true
+                  echo CDI-PRESENT-ROOTLESS
+                in_container: false
+            - check: presence — the deployed host serves the handler, has the refresh units enabled, and links the refreshed spec for its user
+              id: nvidia-cdi-deployed
+              context:
+                - runtime
+              timeout: 300s
+              exit_status: 0
+              stdout:
+                - contains: CDI-DEPLOYED-OK
+              command:
+                command: |
+                  set -eu
+                  # The already-running host daemon must serve the handler — a written
+                  # drop-in is not enough (a drop-in written while a scratch daemon ran
+                  # stayed unserved until the daemon restarted).
+                  sudo -n crictl --runtime-endpoint unix:///run/containerd/containerd.sock --image-endpoint unix:///run/containerd/containerd.sock info > /tmp/nvidia-cdi-deployed-info.json
+                  grep -q '"nvidia"' /tmp/nvidia-cdi-deployed-info.json
+                  grep -q 'runtimes\.nvidia' /etc/containerd/conf.d/99-nvidia.toml
+                  grep -Fq '/etc/containerd/conf.d/*.toml' /etc/containerd/config.toml
+                  test -L /etc/systemd/system/multi-user.target.wants/nvidia-cdi-refresh.path
+                  test -L /etc/systemd/system/multi-user.target.wants/nvidia-cdi-refresh.service
+                  grep -Fq 'L+ %h/.config/cdi/nvidia.yaml - - - - /var/run/cdi/nvidia.yaml' /etc/user-tmpfiles.d/nvidia-cdi.conf
+                  uid=$(getent passwd 1000 >/dev/null 2>&1 && echo 1000 || true)
+                  if [ -z "$uid" ]; then
+                    uid=$(awk -F: '$3>=1000 && $3<65534 {print $3; exit}' /etc/passwd)
+                  fi
+                  if [ -n "$uid" ]; then
+                    sudo -n /usr/local/bin/nvidia-cdi-rootless-link check "$uid"
+                  fi
+                  echo CDI-DEPLOYED-OK
+                in_container: false
+
+nvidia-skill:
+    skill:
+        name: nvidia
+        family: distros
+        owner: nvidia
+        description: |-
+            NVIDIA GPU base image with runtime support and CUDA toolkit on Fedora. Base for all
+            GPU-accelerated boxes (python-ml, jupyter, ollama, comfyui).
+            MUST be invoked before building, deploying, configuring, or troubleshooting the nvidia box.
+        triggers:
+            - "Fedora images / `fedora*` / `box/fedora` submodule (incl. the GPU base `nvidia` / `python-ml` + `sway-browser-vnc`)"
+
+# ---------------------------------------------------------------------------
+# The verb/schema skills this repo's own candy owns — routing only.
+#
+# Each node carries `name`/`family`/`owner` (plus `triggers:` where the skill
+# generates DISPATCHER.md rows). The prose is the skill FILE at
+# `<repo root>/.agents/skills/<name>/SKILL.md`, never an inline `description:`
+# or `content:` — an inline body that disagrees with its file is a hard error
+# in the marketplace generator. `family:` is the marketplace family the skill
+# was authored under, kept so every existing `/charly-<family>:<name>` address
+# still resolves; `owner:` names the candy whose command/kind surface the
+# skill documents. This candy composes no image, so these nodes add nothing to
+# any `ai.opencharly.skill` OCI label; the bodies reach consumers through the
+# generated marketplace corpus.
+# ---------------------------------------------------------------------------
+nvidia-layer-skill:
+    skill:
+        name: nvidia-layer
+        family: distros
+        owner: nvidia

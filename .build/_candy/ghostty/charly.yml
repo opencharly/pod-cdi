@@ -1,0 +1,37 @@
+ghostty:
+    candy:
+        description: |
+            Ghostty GPU-accelerated terminal emulator
+            Installs the ghostty terminal emulator. Verifiable: the ghostty binary
+            lands at /usr/bin/ghostty, the package is registered, and
+            `ghostty --version` reports its version banner.
+        distro:
+            arch:
+                package:
+                    - ghostty
+        plan:
+            - check: the ghostty binary is installed at /usr/bin/ghostty
+              file:
+                file: /usr/bin/ghostty
+                exists: true
+            - check: ghostty reports its version
+              exit_status: 0
+              stdout:
+                - matches: "^Ghostty"
+              command: /usr/bin/ghostty --version
+            - check: file=/usr/bin/ghostty
+              id: ghostty-binary
+              file:
+                file: /usr/bin/ghostty
+                exists: true
+            - check: package=ghostty
+              id: ghostty-package
+              package:
+                package: ghostty
+                installed: true
+            - check: command=/usr/bin/ghostty --version
+              id: ghostty-version
+              exit_status: 0
+              stdout:
+                - matches: "^Ghostty"
+              command: /usr/bin/ghostty --version

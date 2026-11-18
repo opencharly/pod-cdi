@@ -1,0 +1,67 @@
+#  opencharly/distro-cachyos — the cachyos-app-skills skill carrier, completed.
+#
+#  WHAT THIS ADDS (opencharly/sdk#434, the operator's extended ruling): this
+#  directory already held 3 skill node(s) but declared **no `candy:` node**, so it was
+#  not a candy: `candy: [cachyos-app-skills]` failed with `candy "cachyos-app-skills" not found`,
+#  and the operator ruling names that exact measurement. The carrier is now a real
+#  package candy, so the images that carry these skills can COMPOSE it — which is what
+#  makes each skill ride its image AND reach `ai.opencharly.skill`.
+#
+#  THE NODES KEEP ONLY THE ROUTING (name/family/owner/triggers); the prose lives in
+#  `candy/cachyos-app-skills/.agents/skills/<name>/SKILL.md`, the path
+#  `deploykit.CollectSkillBodies` reads (`<owner candy SourceDir>/.agents/skills/`).
+#  The inline `content:` blocks this repo still carried were byte-identical
+#  duplicates of the root `.agents/skills/` files (`#132` added the files without
+#  stripping the bodies); they are stripped HERE, and the root tree is gone, so
+#  there is exactly one copy.
+cachyos-app-skills:
+    candy:
+        description: |-
+            The CachyOS skill carrier for the application-profile skills (`charly-cachyos` the workstation profile, `keepassxc-keyring`, `versa`).  It ships no install
+            content — its payload is the skill prose under `.agents/skills/`, read at build
+            time by the skill collector — and it exists because a skill's `owner:` must name
+            a candy that rides an image, not the image itself (opencharly/sdk#434).
+        plan:
+            - run: this skill-carrier candy ships no install content
+              command: "true"
+              context:
+                - build
+            # ADE wants a deterministic `check:`, and this carrier has nothing to assert
+            # INSIDE the image: it ships no install content, and its payload (the SKILL.md
+            # files) is read at build-config time from the source tree, never copied into the
+            # image. The prose says exactly that — an earlier draft claimed it verified body
+            # resolution, which `true` cannot do; that is covered by `charly box validate`
+            # (deploykit.CollectSkillBodies), whose mutation control is recorded in this PR.
+            - check: this carrier registers as a candy and ships no install content — its skill bodies are validated at build-config time by `charly box validate`, not inside the image
+              id: cachyos-app-skills-no-install-content
+              context:
+                - build
+              command: "true"
+
+charly-cachyos-skill:
+    skill:
+        name: charly-cachyos
+        family: local
+        owner: cachyos-app-skills
+        triggers:
+            - "CachyOS images / `cachyos*` / `charly-cachyos` workstation profile / `box/cachyos` submodule"
+keepassxc-keyring-skill:
+    skill:
+        name: keepassxc-keyring
+        family: infrastructure
+        owner: keepassxc-keyring
+versa-skill:
+    skill:
+        name: versa
+        family: versa
+        owner: cachyos-app-skills
+
+cachyos-coder-tools-skill:
+    skill:
+        name: cachyos-coder-tools
+        family: coder
+        owner: cachyos-app-skills
+        description: |-
+            The minimal CachyOS tool gate (box/cachyos-coder-tools) and the compensating gate for four of the six layer candies the retired non-CachyOS coder workstations were the only live proof of: language runtimes, pixi/uv, typst, the github-actions CLI pair, on the CachyOS (x86_64_v3) base. It cannot cover `google-cloud-npm` (opencharly/layer-google-cloud#5) or `grafana-tools` (opencharly/layer-grafana-tools#4), both filed.
+        triggers:
+            - "CachyOS tool gate / `box/cachyos-coder-tools` / the CachyOS home of the language-runtimes, pixi, typst and github-actions candies"

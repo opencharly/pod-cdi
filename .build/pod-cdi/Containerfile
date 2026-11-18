@@ -1,0 +1,419 @@
+# .build/pod-cdi/Containerfile (generated -- do not edit)
+
+ARG BASE_IMAGE=ghcr.io/opencharly/cachyos:2026.322.1240
+
+FROM scratch AS ffmpeg
+COPY .build/_candy/ffmpeg.v2026.272.0056/ /
+
+FROM scratch AS gnupg
+COPY .build/_candy/gnupg.v2026.272.0138/ /
+
+FROM scratch AS direnv
+COPY .build/_candy/direnv.v2026.272.0057/ /
+
+FROM scratch AS nvidia
+COPY .build/_candy/nvidia.v2026.320.1938/ /
+
+FROM scratch AS cuda
+COPY .build/_candy/cuda.v2026.321.1520/ /
+
+FROM scratch AS ssh-client
+COPY .build/_candy/ssh-client.v2026.272.0430/ /
+
+FROM scratch AS agent-forwarding
+COPY .build/_candy/agent-forwarding.v2026.274.0608/ /
+
+FROM scratch AS cdi
+COPY .build/_candy/cdi.v2026.322.1100/ /
+
+FROM ${BASE_IMAGE}
+
+USER root
+
+# Layer environment variables
+ENV CUDA_HOME="/usr"
+ENV LD_LIBRARY_PATH="/usr/lib64"
+
+# Layer: github.com/opencharly/layer-ffmpeg
+RUN --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked \
+pacman-key --init && \
+(pacman-key --populate 2>/dev/null || true) && \
+pacman -Syu --noconfirm --needed ffmpeg
+
+# Layer: github.com/opencharly/layer-gnupg
+RUN --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked \
+pacman-key --init && \
+(pacman-key --populate 2>/dev/null || true) && \
+pacman -Syu --noconfirm --needed gnupg
+
+# Layer: github.com/opencharly/layer-direnv
+RUN --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked \
+pacman-key --init && \
+(pacman-key --populate 2>/dev/null || true) && \
+pacman -Syu --noconfirm --needed direnv
+RUN mkdir -p '/etc/profile.d' && cat > '/etc/profile.d/charly-direnv-bash.sh' <<'CHARLY_SHELL_BASH_69705bba'
+# opencharly: guard — this drop-in is for bash only (every /etc/profile.d/*.sh is sourced by every POSIX login shell)
+if [ -n "${BASH_VERSION:-}" ] && [ -z "${ZSH_VERSION:-}" ]; then
+	eval "$(direnv hook bash)"
+fi
+
+CHARLY_SHELL_BASH_69705bba
+RUN mkdir -p '/etc/profile.d' && cat > '/etc/profile.d/charly-direnv-zsh.sh' <<'CHARLY_SHELL_ZSH_31939a23'
+# opencharly: guard — this drop-in is for zsh only (every /etc/profile.d/*.sh is sourced by every POSIX login shell)
+if [ -n "${ZSH_VERSION:-}" ]; then
+	eval "$(direnv hook zsh)"
+fi
+
+CHARLY_SHELL_ZSH_31939a23
+RUN mkdir -p '/etc/fish/conf.d' && cat > '/etc/fish/conf.d/charly-direnv.fish' <<'CHARLY_SHELL_FISH_70a9bd2a'
+direnv hook fish | source
+
+CHARLY_SHELL_FISH_70a9bd2a
+
+# Layer: github.com/opencharly/layer-nvidia
+ARG TARGETARCH
+ENV ARCH=${TARGETARCH}
+RUN --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked \
+pacman-key --init && \
+(pacman-key --populate 2>/dev/null || true) && \
+pacman -Syu --noconfirm --needed nvidia-container-toolkit nvidia-utils
+RUN mkdir -p /etc/vulkan/icd.d
+RUN --mount=type=bind,from=nvidia,source=/,target=/ctx --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked sh -c 'SH=/bin/sh; [ -x /bin/bash ] && SH=/bin/bash; exec "$SH"' sh <<'OVCMD'
+BUILD_ARCH=$(uname -m)
+case "$BUILD_ARCH" in
+  x86_64) ARCH=amd64 ;;
+  aarch64) ARCH=arm64 ;;
+  armv7l|armv7|armhf) ARCH=arm ;;
+  *) ARCH=$BUILD_ARCH ;;
+esac
+export BUILD_ARCH ARCH
+set -e
+# BOTH filenames: Arch/CachyOS ship /usr/share/vulkan/icd.d/nvidia_icd.json,
+# Fedora's package ships nvidia_icd.x86_64.json. Testing only the Fedora
+# name made this step a silent no-op on Arch -- measured on a cachyos image:
+# `ls /usr/share/vulkan/icd.d/` -> nvidia_icd.json, and /etc/vulkan/icd.d/
+# carried no image-side link.
+icd=
+for c in /usr/share/vulkan/icd.d/nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.x86_64.json; do
+  if [ -f "$c" ]; then icd="$c"; break; fi
+done
+if [ -n "$icd" ]; then
+  ln -sf "$icd" /etc/vulkan/icd.d/nvidia_icd.json
+  echo "wired Vulkan ICD: $icd"
+else
+  echo "no Vulkan ICD JSON in the package set for this distro"
+fi
+[ -f /usr/share/vulkan/implicit_layer.d/nvidia_layers.json ] && \
+  ln -sf /usr/share/vulkan/implicit_layer.d/nvidia_layers.json /etc/vulkan/icd.d/nvidia_layers.json || true
+true
+OVCMD
+RUN --mount=type=bind,from=nvidia,source=/,target=/ctx --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked sh -c 'SH=/bin/sh; [ -x /bin/bash ] && SH=/bin/bash; exec "$SH"' sh <<'OVCMD'
+BUILD_ARCH=$(uname -m)
+case "$BUILD_ARCH" in
+  x86_64) ARCH=amd64 ;;
+  aarch64) ARCH=arm64 ;;
+  armv7l|armv7|armhf) ARCH=arm ;;
+  *) ARCH=$BUILD_ARCH ;;
+esac
+export BUILD_ARCH ARCH
+set -e
+set -eu
+# Patterns == the libs the NVIDIA CDI spec injects (its own /usr/lib
+# containerPaths): everything matching is host-coupled by definition.
+# A symlinked /usr/lib64 (Arch) is skipped so nothing is counted or
+# deleted twice.
+removed=0
+for d in /usr/lib /usr/lib64; do
+  if [ ! -d "$d" ] || [ -L "$d" ]; then continue; fi
+  out=$(find "$d" -maxdepth 1 \( -name 'libnvidia-*.so*' -o -name 'libcuda*.so*' \
+        -o -name 'libnvcuvid.so*' -o -name 'libnvoptix.so*' -o -name 'libGLX_nvidia.so*' \
+        -o -name 'libEGL_nvidia.so*' -o -name 'libGLESv1_CM_nvidia.so*' \
+        -o -name 'libGLESv2_nvidia.so*' \) -print -delete 2>/dev/null || true)
+  n=$(printf '%s\n' "$out" | grep -c . || true)
+  removed=$((removed + n))
+done
+rm -rf /usr/lib/nvidia /usr/lib/vdpau /usr/lib/xorg/modules/drivers/nvidia_drv.so
+echo "dropped $removed driver library file(s) plus the xorg/vdpau driver trees"
+# THE ENFORCEMENT, and it lives HERE rather than in a `check:` step on
+# purpose. This RUN executes in the build container, where no CDI has
+# injected anything -- so every match below IS image content, with no
+# ambiguity. A `check:` step runs in a container the GPU seam may attach,
+# where the host's identical-version libs sit at the same paths, and the
+# only way to tell them apart from baked ones is /proc/self/mountinfo --
+# which is not readable on every venue (measured: the probe went red on a
+# CORRECT fedora image for exactly that reason). A control that has to
+# guess is worse than a control that cannot be fooled.
+# \-type f OR \-type l: the failure this replaced was a SYMLINK
+# (libnvidia-ml.so.1 -> libnvidia-ml.so.620.70.06), so a files-only count
+# would let the exact bug class walk back in. The delete above has no
+# -type restriction, so the two sets match.
+left=$(find /usr/lib /usr/lib64 -maxdepth 1 \( -type f -o -type l \) \
+    \( -name 'libnvidia-*.so*' -o -name 'libcuda*.so*' -o -name 'libnvcuvid.so*' \
+    -o -name 'libnvoptix.so*' -o -name 'libGLX_nvidia.so*' -o -name 'libEGL_nvidia.so*' \
+    -o -name 'libGLESv1_CM_nvidia.so*' -o -name 'libGLESv2_nvidia.so*' \) 2>/dev/null | wc -l)
+echo "driver library files still baked after the strip: $left"
+if [ "$left" -ne 0 ]; then
+  find /usr/lib /usr/lib64 -maxdepth 1 -type f -name 'libnvidia-*.so*' 2>/dev/null | head -5
+  echo "a LATER layer re-introduced a host-coupled driver library; strip it in that candy's own plan too"
+  exit 1
+fi
+OVCMD
+
+# Layer: github.com/opencharly/layer-cuda
+ARG TARGETARCH
+ENV ARCH=${TARGETARCH}
+RUN --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked \
+pacman-key --init && \
+(pacman-key --populate 2>/dev/null || true) && \
+pacman -Syu --noconfirm --needed cuda cudnn python-onnxruntime-cpu
+RUN --mount=type=bind,from=cuda,source=/,target=/ctx --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked sh -c 'SH=/bin/sh; [ -x /bin/bash ] && SH=/bin/bash; exec "$SH"' sh <<'OVCMD'
+BUILD_ARCH=$(uname -m)
+case "$BUILD_ARCH" in
+  x86_64) ARCH=amd64 ;;
+  aarch64) ARCH=arm64 ;;
+  armv7l|armv7|armhf) ARCH=arm ;;
+  *) ARCH=$BUILD_ARCH ;;
+esac
+export BUILD_ARCH ARCH
+set -e
+if [ ! -f /etc/fedora-release ]; then
+  exit 0
+fi
+CUDNN_DIR=$(mktemp -d)
+cd "$CUDNN_DIR"
+if dnf5 download --enable-repo="fedora-multimedia" cuda-cudnn-devel 2>/dev/null; then
+  rpm2cpio cuda-cudnn-devel*.rpm | cpio -idm 2>/dev/null
+  [ -d ./usr/include ] && cp -v ./usr/include/cudnn*.h /usr/include/
+  while IFS= read -r -d '' link; do
+    name=$(basename "$link")
+    versioned=""
+    for v in /usr/lib64/"${name}".*; do
+      if [ -f "$v" ] && ! echo "$v" | grep -q '\.so$'; then
+        versioned="$v"; break
+      fi
+    done
+    [ -n "$versioned" ] && [ ! -e /usr/lib64/"$name" ] && ln -sv "$(basename "$versioned")" /usr/lib64/"$name"
+  done < <(find ./usr/lib64 -maxdepth 1 -name '*.so' -type l -print0 2>/dev/null)
+fi
+cd / && rm -rf "$CUDNN_DIR"
+OVCMD
+RUN --mount=type=bind,from=cuda,source=/,target=/ctx --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked sh -c 'SH=/bin/sh; [ -x /bin/bash ] && SH=/bin/bash; exec "$SH"' sh <<'OVCMD'
+BUILD_ARCH=$(uname -m)
+case "$BUILD_ARCH" in
+  x86_64) ARCH=amd64 ;;
+  aarch64) ARCH=arm64 ;;
+  armv7l|armv7|armhf) ARCH=arm ;;
+  *) ARCH=$BUILD_ARCH ;;
+esac
+export BUILD_ARCH ARCH
+set -e
+if [ ! -f /etc/arch-release ]; then
+  exit 0
+fi
+# nvcc + cuobjdump + ptxas + nvprof — every binary in /opt/cuda/bin
+for bin in /opt/cuda/bin/*; do
+  [ -e "$bin" ] && ln -sf "$bin" /usr/bin/$(basename "$bin")
+done
+# Headers — cudnn*.h live in /opt/cuda/targets/x86_64-linux/include
+# on the cudnn package, while CUDA's own headers live in
+# /opt/cuda/include. Symlink both into /usr/include.
+# Headers — link EVERY ENTRY of each toolkit include root, not a guessed subset.
+# nvcc computes its default include root RELATIVE to its own executable, and
+# /usr/bin/nvcc is a symlink, so all CUDA headers must be reachable under
+# /usr/include. Enumerating by pattern is what broke this: a `*.h` glob linked the
+# top-level headers but silently dropped (a) the SUBTREES crt/ and cccl/, which
+# killed every build at CMake's enable_language(CUDA) with "crt/host_config.h: No
+# such file or directory", and then (b) the `.hpp` half of the `_functions` family
+# (`vector_functions.hpp` and friends), which killed the very next stage -- both
+# reported on opencharly/layer-cuda#9. Linking every entry needs no extension list
+# to keep in sync and cannot silently miss a file or a subtree again.
+# nvcc resolves its OWN helpers relative to its own executable path. Through the
+# /usr/bin/nvcc symlink that means /usr/<sibling>/ — so the toolkit's sibling TREES
+# must exist at /usr too, not only its files. Without /usr/nvvm, nvcc cannot find its
+# backend compiler at all: "$CICC_PATH/cicc: No such file or directory"
+# (/usr/sbin/../nvvm/bin/cicc), and every CUDA compile dies while PREPROCESSING
+# still succeeds — which is exactly how the check added in #10 stayed green through
+# it. Both halves of that lesson are fixed here.
+for tree in nvvm; do
+  [ -d "/opt/cuda/$tree" ] && [ ! -e "/usr/$tree" ] && ln -sfn "/opt/cuda/$tree" "/usr/$tree"
+done
+for root in /opt/cuda/include /opt/cuda/targets/x86_64-linux/include; do
+  [ -d "$root" ] || continue
+  for entry in "$root"/*; do
+    [ -e "$entry" ] || continue
+    ln -sfn "$entry" /usr/include/"$(basename "$entry")"
+  done
+done
+# Libraries: libcudart, libcudnn, libcurand, etc.
+mkdir -p /usr/lib64
+# Enumerate EVERY entry, not a `*.so*` glob. nvcc links the STATIC archives by
+# default (libcudart_static.a, libcudadevrt.a, libculibos.a, ...), and a `.so*`
+# pattern cannot match a `.a` — so the linker failed with "cannot find
+# -lcudart_static: No such file or directory" although the package ships the file
+# (opencharly/layer-cuda#12). Same defect shape as the `*.h` header glob that missed
+# `.hpp`: pattern-matching a directory instead of enumerating it.
+mkdir -p /usr/lib64
+for libdir in /opt/cuda/targets/x86_64-linux/lib /opt/cuda/lib64; do
+  [ -d "$libdir" ] || continue
+  for entry in "$libdir"/*; do
+    [ -e "$entry" ] || continue
+    ln -sfn "$entry" /usr/lib64/"$(basename "$entry")"
+  done
+done
+OVCMD
+RUN --mount=type=bind,from=cuda,source=/,target=/ctx --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked sh -c 'SH=/bin/sh; [ -x /bin/bash ] && SH=/bin/bash; exec "$SH"' sh <<'OVCMD'
+BUILD_ARCH=$(uname -m)
+case "$BUILD_ARCH" in
+  x86_64) ARCH=amd64 ;;
+  aarch64) ARCH=arm64 ;;
+  armv7l|armv7|armhf) ARCH=arm ;;
+  *) ARCH=$BUILD_ARCH ;;
+esac
+export BUILD_ARCH ARCH
+set -e
+set -eu
+removed=0
+for d in /usr/lib /usr/lib64; do
+  if [ ! -d "$d" ] || [ -L "$d" ]; then continue; fi
+  out=$(find "$d" -maxdepth 1 \( -name 'libnvidia-*.so*' -o -name 'libcuda*.so*' \
+        -o -name 'libnvcuvid.so*' -o -name 'libnvoptix.so*' -o -name 'libGLX_nvidia.so*' \
+        -o -name 'libEGL_nvidia.so*' -o -name 'libGLESv1_CM_nvidia.so*' \
+        -o -name 'libGLESv2_nvidia.so*' \) -print -delete 2>/dev/null || true)
+  n=$(printf '%s\n' "$out" | grep -c . || true)
+  removed=$((removed + n))
+done
+rm -rf /usr/lib/nvidia /usr/lib/vdpau /usr/lib/xorg/modules/drivers/nvidia_drv.so
+echo "dropped $removed driver library file(s) plus the xorg/vdpau driver trees"
+# The BINARIES are host-coupled in exactly the same way, and the CDI injection
+# mounts them too (measured in a live pod: nvidia-smi, nvidia-cuda-mps-control,
+# nvidia-cuda-mps-server, nvidia-debugdump, nvidia-persistenced, nvidia-xconfig
+# are all bind-mounted from the host). A baked copy is a second, wrong-version
+# one, and for nvidia-smi it is actively misleading: it reports on the image's
+# own libraries instead of the ones injected with the running driver.
+#
+# This deletes the WHOLE `nvidia*` set rather than a hand-listed subset. A
+# subset is how this step first shipped and its own assertion caught three
+# leftovers it had missed (nvidia-container-toolkit and its two
+# nvidia-container-runtime.<variant> wrappers) -- because the package also
+# ships nvidia-ngx-updater, nvidia-pcc, nvidia-powerd and nvidia-sleep.sh, and
+# a list that has to be right about every one of them will be wrong again.
+# None of them belong in an image: the NVIDIA CONTAINER TOOLKIT is HOST
+# tooling -- it generates the CDI spec and lives on the operator's machine --
+# so an image copy is a second, drifting one that nothing runs.
+binned=0
+for d in /usr/bin /usr/local/bin /usr/sbin; do
+  if [ ! -d "$d" ]; then continue; fi
+  out=$(find "$d" -maxdepth 1 \( -type f -o -type l \) -name 'nvidia*' \
+        -print -delete 2>/dev/null || true)
+  n=$(printf '%s\n' "$out" | grep -c . || true)
+  binned=$((binned + n))
+done
+echo "dropped $binned host-coupled nvidia binary/binaries"
+left=$(find /usr/lib /usr/lib64 -maxdepth 1 \( -type f -o -type l \) \
+    \( -name 'libnvidia-*.so*' -o -name 'libcuda*.so*' -o -name 'libnvcuvid.so*' \
+    -o -name 'libnvoptix.so*' -o -name 'libGLX_nvidia.so*' \
+    -o -name 'libEGL_nvidia.so*' -o -name 'libGLESv1_CM_nvidia.so*' \
+    -o -name 'libGLESv2_nvidia.so*' \) 2>/dev/null | wc -l)
+bleft=0
+for d in /usr/bin /usr/local/bin /usr/sbin; do
+  if [ ! -d "$d" ]; then continue; fi
+  n=$(find "$d" -maxdepth 1 \( -type f -o -type l \) -name 'nvidia*' 2>/dev/null | wc -l)
+  bleft=$((bleft + n))
+done
+echo "driver library files still baked after the strip: $left"
+echo "host-coupled nvidia binaries still baked after the strip: $bleft"
+test "$left" -eq 0 || exit 1
+test "$bleft" -eq 0 || exit 1
+OVCMD
+
+# Layer: github.com/opencharly/layer-ssh-client
+RUN --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked \
+pacman-key --init && \
+(pacman-key --populate 2>/dev/null || true) && \
+pacman -Syu --noconfirm --needed openssh
+
+# Layer: github.com/opencharly/layer-agent-forwarding
+
+# Layer: github.com/opencharly/layer-cdi
+ARG TARGETARCH
+ENV ARCH=${TARGETARCH}
+RUN --mount=type=bind,from=cdi,source=/,target=/ctx --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked sh -c 'SH=/bin/sh; [ -x /bin/bash ] && SH=/bin/bash; exec "$SH"' sh <<'OVCMD'
+BUILD_ARCH=$(uname -m)
+case "$BUILD_ARCH" in
+  x86_64) ARCH=amd64 ;;
+  aarch64) ARCH=arm64 ;;
+  armv7l|armv7|armhf) ARCH=arm ;;
+  *) ARCH=$BUILD_ARCH ;;
+esac
+export BUILD_ARCH ARCH
+set -e
+set -eu
+# The directories are overridable so the assertion can be EXECUTED against fixtures
+# (and so a bed can prove it discriminates) without a GPU or an image build. The
+# default is the image's own layout.
+# THREE surfaces, because the removal touches three: the top-level libraries, the
+# driver TREES the packages ship (nvidia/, vdpau/ — where libvdpau_nvidia.so lives),
+# and the xorg driver. An assertion that only counts the first surface passes on an
+# image whose vdpau/xorg driver content survived, which is exactly what the deleted
+# strip's `rm -rf` lines existed to remove.
+libs=${CDI_LIB_DIRS:-/usr/lib /usr/lib64}
+trees=${CDI_TREE_DIRS:-/usr/lib/nvidia /usr/lib64/nvidia /usr/lib/vdpau}
+xorg=${CDI_XORG_DRIVER:-/usr/lib/xorg/modules/drivers/nvidia_drv.so}
+left=0
+for d in $libs; do
+  [ -d "$d" ] || continue
+  n=$(find "$d" -maxdepth 1 \( -type f -o -type l \) \
+      \( -name 'libnvidia-*.so*' -o -name 'libcuda*.so*' -o -name 'libnvcuvid.so*' \
+      -o -name 'libnvoptix.so*' -o -name 'libGLX_nvidia.so*' \
+      -o -name 'libEGL_nvidia.so*' -o -name 'libGLESv1_CM_nvidia.so*' \
+      -o -name 'libGLESv2_nvidia.so*' -o -name 'libvdpau_nvidia.so*' \) 2>/dev/null | wc -l)
+  left=$((left + n))
+done
+for d in $trees; do
+  [ -d "$d" ] || continue
+  n=$(find "$d" \( -type f -o -type l \) 2>/dev/null | wc -l)
+  left=$((left + n))
+done
+if [ -e "$xorg" ] || [ -L "$xorg" ]; then left=$((left + 1)); fi
+echo "cdi: driver libraries still baked: $left"
+test "$left" -eq 0
+OVCMD
+RUN --mount=type=bind,from=cdi,source=/,target=/ctx --mount=type=cache,id=charly-var-cache-pacman-pkg,dst=/var/cache/pacman/pkg,sharing=locked sh -c 'SH=/bin/sh; [ -x /bin/bash ] && SH=/bin/bash; exec "$SH"' sh <<'OVCMD'
+BUILD_ARCH=$(uname -m)
+case "$BUILD_ARCH" in
+  x86_64) ARCH=amd64 ;;
+  aarch64) ARCH=arm64 ;;
+  armv7l|armv7|armhf) ARCH=arm ;;
+  *) ARCH=$BUILD_ARCH ;;
+esac
+export BUILD_ARCH ARCH
+set -e
+set -eu
+bins=${CDI_BIN_DIRS:-/usr/bin /usr/local/bin /usr/sbin}
+left=0
+for d in $bins; do
+  [ -d "$d" ] || continue
+  n=$(find "$d" -maxdepth 1 \( -type f -o -type l \) -name 'nvidia*' 2>/dev/null | wc -l)
+  left=$((left + n))
+done
+echo "cdi: nvidia binaries still baked: $left"
+test "$left" -eq 0
+OVCMD
+
+USER 1000
+# Image metadata
+LABEL ai.opencharly.box="pod-cdi"
+LABEL ai.opencharly.uid="1000"
+LABEL ai.opencharly.gid="1000"
+LABEL ai.opencharly.user="user"
+LABEL ai.opencharly.home="/home/user"
+LABEL ai.opencharly.platform.distro='["cachyos","arch"]'
+LABEL ai.opencharly.platform.format='["pac"]'
+LABEL ai.opencharly.description='{"candy":[{"origin":"candy:github.com/opencharly/layer-direnv","description":"direnv — automatic per-directory environment loading from .envrc files\ndirenv installs the `direnv` binary (one package name across\nfedora/arch/debian) AND declaratively wires the per-shell hook that\nmakes .envrc autoload work. At `charly box build` the shell: schema\nbakes the hook into /etc/profile.d/charly-direnv-\u003cshell\u003e.sh for\nbash/zsh (the generic body `eval \"$(direnv hook \u003cshell\u003e)\"` with\n${SHELL_NAME} substituted) and the fish-specific hook into\n/etc/fish/conf.d/charly-direnv.fish (`direnv hook fish | source`).\n`sh` is intentionally opted OUT (`sh: {}`): upstream `direnv hook`\nsupports bash/zsh/fish/tcsh but NOT `sh`, so `direnv hook sh` errors\non every shell that sources it. The scenarios assert the\ninstalled/runnable binary AND the baked hook drop-ins, so they fail if\neither the package or the shell wiring is missing.\n","plan":[{"check":"the direnv binary is installed at /usr/bin/direnv for the .envrc/.secrets autoload workflow","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/direnv"},"intent_do":"assert"},{"check":"direnv reports its version without error","plugin":"command","plugin_input":{"command":"/usr/bin/direnv version"},"intent_do":"assert","exit_status":0},{"check":"the bash shell-init drop-in EVALs the direnv hook, guarded to bash only (the guard stops bash from running the zsh drop-in, which /etc/profile also sources)","plugin":"file","plugin_input":{"contains":["eval \"$(direnv hook bash)\"","BASH_VERSION"],"exists":true,"file":"/etc/profile.d/charly-direnv-bash.sh"},"intent_do":"assert"},{"check":"the zsh shell-init drop-in EVALs the direnv zsh hook, guarded to zsh only","plugin":"file","plugin_input":{"contains":["eval \"$(direnv hook zsh)\"","ZSH_VERSION"],"exists":true,"file":"/etc/profile.d/charly-direnv-zsh.sh"},"intent_do":"assert"},{"check":"NO sh drop-in is baked — `direnv hook sh` is not a valid target, so the sh:{} opt-out must suppress /etc/profile.d/charly-direnv-sh.sh (a file here means the invalid hook ships and errors on every sh)","plugin":"command","id":"direnv-no-sh-dropin","plugin_input":{"command":"test ! -e /etc/profile.d/charly-direnv-sh.sh"},"intent_do":"assert","exit_status":0},{"check":"the zsh drop-in is guarded to zsh — sourcing it under bash must produce zero errors (the zsh body uses zsh-only syntax, so an unguarded drop-in errors under bash; this is the observable cross-shell regression)","plugin":"command","id":"direnv-zsh-guard-inert-under-bash","plugin_input":{"command":"bash -c '\''. /etc/profile.d/charly-direnv-zsh.sh 2\u003e\u00261'\'' | grep -cE '\''not found|syntax error|unknown target'\'' || true"},"intent_do":"assert","stdout":[{"op":"equals","value":"0"}]},{"check":"the fish shell-init drop-in is baked into its conf.d and sources the direnv fish hook","plugin":"file","plugin_input":{"contains":["direnv hook fish"],"exists":true,"file":"/etc/fish/conf.d/charly-direnv.fish"},"intent_do":"assert"},{"check":"package=direnv","plugin":"package","id":"direnv-package","plugin_input":{"installed":true,"package":"direnv"},"intent_do":"assert"},{"check":"command=/usr/bin/direnv version","plugin":"command","id":"direnv-version","plugin_input":{"command":"/usr/bin/direnv version"},"intent_do":"assert","exit_status":0,"stdout":[{"op":"matches","value":"[0-9]+\\.[0-9]+"}]}]},{"origin":"candy:github.com/opencharly/layer-ffmpeg","description":"FFmpeg provides command-line audio/video transcoding and media inspection\nInstalls the ffmpeg package (from the negativo17 fedora-multimedia repo\non Fedora, core/extra on Arch). It ships the ffmpeg transcoder and the\nffprobe media inspector under /usr/bin, both of which print a version\nbanner to stdout — so their presence and basic operability are directly\nverifiable.\n","plan":[{"check":"the ffmpeg transcoder binary is installed at /usr/bin/ffmpeg","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/ffmpeg"},"intent_do":"assert"},{"check":"ffmpeg prints its version banner to stdout","plugin":"command","plugin_input":{"command":"ffmpeg -version"},"intent_do":"assert","exit_status":0,"stdout":[{"op":"contains","value":"ffmpeg version"}]},{"check":"the ffprobe media inspector binary is installed at /usr/bin/ffprobe","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/ffprobe"},"intent_do":"assert"},{"check":"ffprobe prints its version banner to stdout","plugin":"command","plugin_input":{"command":"ffprobe -version"},"intent_do":"assert","exit_status":0,"stdout":[{"op":"contains","value":"ffprobe version"}]},{"check":"package=ffmpeg","plugin":"package","id":"ffmpeg-package","plugin_input":{"installed":true,"package":"ffmpeg"},"intent_do":"assert"}]},{"origin":"candy:github.com/opencharly/layer-gnupg","description":"GnuPG encryption and signing tools for GPG agent forwarding\nInstalls the GnuPG suite (gpg, gpgconf, gpg-agent, gpg-connect-agent)\nfrom the distro package -- gnupg on arch/debian/ubuntu, gnupg2 on\nfedora. The binaries land in /usr/bin and gpg reports its GnuPG\nversion string, so the install and the agent-forwarding tooling are\ndirectly verifiable inside the built image.\n","plan":[{"check":"the gpg encryption/signing binary is present at /usr/bin/gpg","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/gpg"},"intent_do":"assert"},{"check":"invoking gpg --version exits cleanly and identifies itself as GnuPG","plugin":"command","plugin_input":{"command":"/usr/bin/gpg --version"},"intent_do":"assert","exit_status":0,"stdout":[{"op":"contains","value":"gpg (GnuPG)"}]},{"check":"the gpg-agent daemon ships so a forwarded host agent can answer key operations","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/gpg-agent"},"intent_do":"assert"},{"check":"the gpgconf helper ships so the agent socket path can be resolved","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/gpgconf"},"intent_do":"assert"},{"check":"package=gnupg","plugin":"package","id":"gnupg-package","plugin_input":{"installed":true,"package":"gnupg","package_map":{"fedora":"gnupg2"}},"intent_do":"assert"}]},{"origin":"candy:github.com/opencharly/layer-nvidia","description":"NVIDIA GPU runtime — nvidia-container-toolkit (nvidia-ctk CDI) plus the driver-lib path and Vulkan ICD wiring\nInstalls nvidia-container-toolkit (the nvidia-ctk CLI that generates\nCDI device specs) alongside the per-distro driver libs (nvidia-utils\non Arch, libva-nvidia-driver on Fedora). Exports\nLD_LIBRARY_PATH=/usr/lib64 so the GPU driver libraries resolve, and\nprepares /etc/vulkan/icd.d to hold the nvidia Vulkan ICD symlinks.\nEvery effect — the package, the nvidia-ctk binary, the exported path,\nand the ICD directory — is a real artifact baked into the image, so\neach is directly verifiable without a physical GPU.\n","plan":[{"run":"command=[ -f /usr/share/vulkan/icd.d/nvidia_icd.x86_64.json ] \u0026\u0026 \\\n  ln -sf /usr/share/vulkan/icd.d/nvidia_icd.x86_64.json /etc/vulkan/icd.d/nvidia_icd.json || true\n[ -f /usr/share/vulkan/implicit_layer.d/nvidia_layers.json ] \u0026\u0026 \\\n  ln -sf /usr/share/vulkan/implicit_layer.d/nvidia_layers.json /etc/vulkan/icd.d/nvidia_layers.json || true\n","plugin":"command","plugin_input":{"command":"# BOTH filenames: Arch/CachyOS ship /usr/share/vulkan/icd.d/nvidia_icd.json,\n# Fedora'\''s package ships nvidia_icd.x86_64.json. Testing only the Fedora\n# name made this step a silent no-op on Arch -- measured on a cachyos image:\n# `ls /usr/share/vulkan/icd.d/` -\u003e nvidia_icd.json, and /etc/vulkan/icd.d/\n# carried no image-side link.\nicd=\nfor c in /usr/share/vulkan/icd.d/nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.x86_64.json; do\n  if [ -f \"$c\" ]; then icd=\"$c\"; break; fi\ndone\nif [ -n \"$icd\" ]; then\n  ln -sf \"$icd\" /etc/vulkan/icd.d/nvidia_icd.json\n  echo \"wired Vulkan ICD: $icd\"\nelse\n  echo \"no Vulkan ICD JSON in the package set for this distro\"\nfi\n[ -f /usr/share/vulkan/implicit_layer.d/nvidia_layers.json ] \u0026\u0026 \\\n  ln -sf /usr/share/vulkan/implicit_layer.d/nvidia_layers.json /etc/vulkan/icd.d/nvidia_layers.json || true\ntrue\n"},"run_as":"root","intent_do":"act"},{"run":"drop the host-coupled driver user-space nvidia-utils ships, so the CDI mount is its ONLY provider","plugin":"command","id":"nvidia-drop-driver-userspace","plugin_input":{"command":"set -eu\n# Patterns == the libs the NVIDIA CDI spec injects (its own /usr/lib\n# containerPaths): everything matching is host-coupled by definition.\n# A symlinked /usr/lib64 (Arch) is skipped so nothing is counted or\n# deleted twice.\nremoved=0\nfor d in /usr/lib /usr/lib64; do\n  if [ ! -d \"$d\" ] || [ -L \"$d\" ]; then continue; fi\n  out=$(find \"$d\" -maxdepth 1 \\( -name '\''libnvidia-*.so*'\'' -o -name '\''libcuda*.so*'\'' \\\n        -o -name '\''libnvcuvid.so*'\'' -o -name '\''libnvoptix.so*'\'' -o -name '\''libGLX_nvidia.so*'\'' \\\n        -o -name '\''libEGL_nvidia.so*'\'' -o -name '\''libGLESv1_CM_nvidia.so*'\'' \\\n        -o -name '\''libGLESv2_nvidia.so*'\'' \\) -print -delete 2\u003e/dev/null || true)\n  n=$(printf '\''%s\\n'\'' \"$out\" | grep -c . || true)\n  removed=$((removed + n))\ndone\nrm -rf /usr/lib/nvidia /usr/lib/vdpau /usr/lib/xorg/modules/drivers/nvidia_drv.so\necho \"dropped $removed driver library file(s) plus the xorg/vdpau driver trees\"\n# THE ENFORCEMENT, and it lives HERE rather than in a `check:` step on\n# purpose. This RUN executes in the build container, where no CDI has\n# injected anything -- so every match below IS image content, with no\n# ambiguity. A `check:` step runs in a container the GPU seam may attach,\n# where the host'\''s identical-version libs sit at the same paths, and the\n# only way to tell them apart from baked ones is /proc/self/mountinfo --\n# which is not readable on every venue (measured: the probe went red on a\n# CORRECT fedora image for exactly that reason). A control that has to\n# guess is worse than a control that cannot be fooled.\n# \\-type f OR \\-type l: the failure this replaced was a SYMLINK\n# (libnvidia-ml.so.1 -\u003e libnvidia-ml.so.620.70.06), so a files-only count\n# would let the exact bug class walk back in. The delete above has no\n# -type restriction, so the two sets match.\nleft=$(find /usr/lib /usr/lib64 -maxdepth 1 \\( -type f -o -type l \\) \\\n    \\( -name '\''libnvidia-*.so*'\'' -o -name '\''libcuda*.so*'\'' -o -name '\''libnvcuvid.so*'\'' \\\n    -o -name '\''libnvoptix.so*'\'' -o -name '\''libGLX_nvidia.so*'\'' -o -name '\''libEGL_nvidia.so*'\'' \\\n    -o -name '\''libGLESv1_CM_nvidia.so*'\'' -o -name '\''libGLESv2_nvidia.so*'\'' \\) 2\u003e/dev/null | wc -l)\necho \"driver library files still baked after the strip: $left\"\nif [ \"$left\" -ne 0 ]; then\n  find /usr/lib /usr/lib64 -maxdepth 1 -type f -name '\''libnvidia-*.so*'\'' 2\u003e/dev/null | head -5\n  echo \"a LATER layer re-introduced a host-coupled driver library; strip it in that candy'\''s own plan too\"\n  exit 1\nfi\n"},"run_as":"root","intent_do":"act"},{"check":"the nvidia-container-toolkit repo enforces package signature verification, so its packages cannot install unverified","plugin":"command","id":"nvidia-container-toolkit-gpgcheck-enforced","plugin_input":{"command":"set -eu\n# Skip by DISTRO, never by file presence. \"the override file is absent\" is true on the\n# Arch arms but ALSO on a Fedora where the override was never written -- and there a\n# missing override leaves NVIDIA'\''s vendor gpgcheck=0 repo in force, which is exactly what\n# this check exists to catch. A file-presence proxy for \"Arch\" made that Fedora a\n# false-green. So:\n#   * no DNF at all (arch/cachyos/omarchy)      -\u003e exit 0: nothing to assert, honestly;\n#   * a DNF host whose override file is MISSING -\u003e FAIL: the vendor gpgcheck=0 repo stands;\n#   * a DNF host whose section lacks gpgcheck=1 -\u003e FAIL.\n# The section is extracted ONCE and reused for the assertion and the message.\n# \"no DNF at all\" means no dnf TOOLING -- not \"neither directory exists\". Arch-family\n# arms have no /etc/dnf, but /etc/yum.repos.d can exist there (an unrelated package may\n# create it), and testing both directories made the guard `true \u0026\u0026 false` = false, so\n# the arm fell through to the Fedora assertion and FAILED on a DNF repo it does not have.\n# Measured: cachyos failed here with the pre-#12 content gone and this guard in place.\nif ! command -v dnf \u003e/dev/null 2\u003e\u00261 \u0026\u0026 [ ! -e /etc/dnf ]; then\n  exit 0\nfi\nf=/etc/dnf/repos.override.d/99-config_manager.repo\nsection=$(awk '\''/^\\[nvidia-container-toolkit\\]/{x=1;next} /^\\[/{x=0} x'\'' \"$f\" 2\u003e/dev/null || true)\nprintf '\''%s\\n'\'' \"$section\" | grep -q '\''gpgcheck=1'\'' || {\n  echo \"the nvidia-container-toolkit repo does not enforce gpgcheck=1 on this DNF host\"\n  echo \"  file: $f\"\n  echo \"  section: ${section:-\u003cabsent\u003e}\"\n  exit 1\n}\n"},"intent_do":"assert"},{"check":"the nvidia-container-toolkit package is installed for CDI device generation","plugin":"package","plugin_input":{"installed":true,"package":"nvidia-container-toolkit"},"intent_do":"assert"},{"check":"the nvidia-ctk CLI binary lands on the canonical /usr/bin path","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/nvidia-ctk"},"intent_do":"assert"},{"check":"nvidia-ctk runs and reports a version number","plugin":"command","plugin_input":{"command":"nvidia-ctk --version"},"intent_do":"assert","exit_status":0,"stdout":[{"op":"matches","value":"[0-9]+\\.[0-9]+"}]},{"check":"the Vulkan ICD directory exists to hold the nvidia ICD symlinks","plugin":"file","plugin_input":{"exists":true,"file":"/etc/vulkan/icd.d","filetype":"directory"},"intent_do":"assert"},{"check":"the NVIDIA runtime asset THIS distro provides is present (Vulkan ICD JSON on Arch, VA-API driver on Fedora)","plugin":"command","id":"nvidia-distro-runtime-assets","plugin_input":{"command":"set -eu\n# Rewritten WITH the driver-user-space strip, because the old form of this\n# check asserted the very thing the contract forbids: it ran\n#   ls -d /usr/lib64/nvidia /usr/lib/nvidia /usr/lib64/libnvidia* /usr/lib/libnvidia* ...\n# and required \"nvidia\" in the output, i.e. it demanded that the host-coupled\n# driver libraries BE baked into the image. Once the strip landed it went red\n# on a correct image: `stdout: expected to contain \"nvidia\" (got: )`\n# (measured on check-cachyos-ollama-pod, plan:candy:...:8).\n#\n# It now asserts the DISTRO'\''S OWN asset STRICTLY -- an any-of over the three\n# candidates would pass an Arch image that is missing the Vulkan ICD it is\n# supposed to wire, simply because nvidia-smi happened to be there.\n#   * Arch / CachyOS / Omarchy: the Vulkan ICD JSON the wiring step links;\n#   * Fedora:                    the VA-API driver from libva-nvidia-driver.\n# The distro is decided by the presence of DNF tooling, the same guard the\n# gpgcheck probe below uses (\"no DNF at all\" == the Arch-family arms).\nif command -v dnf \u003e/dev/null 2\u003e\u00261 || [ -e /etc/dnf ]; then\n  if [ ! -f /usr/lib64/dri/nvidia_drv_video.so ] \u0026\u0026 [ ! -f /usr/lib/dri/nvidia_drv_video.so ]; then\n    echo \"fedora: the VA-API driver from libva-nvidia-driver is MISSING\"\n    exit 1\n  fi\n  echo \"fedora: VA-API driver present\"\nelse\n  # Arch/CachyOS ship nvidia_icd.json; Fedora'\''s package the .x86_64 name.\n  # A glob over both is the assertion; naming only one made this check fail\n  # on a correct cachyos image (measured).\n  found=\n  for c in /usr/share/vulkan/icd.d/nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.x86_64.json; do\n    if [ -f \"$c\" ]; then found=\"$c\"; fi\n  done\n  if [ -z \"$found\" ]; then\n    echo \"arch: the Vulkan ICD JSON is MISSING\"\n    exit 1\n  fi\n  echo \"arch: Vulkan ICD JSON present ($found)\"\nfi\n# SCOPE: this step asserts PRESENCE of the distro asset only. The ABSENCE of\n# the host-coupled driver libraries is asserted by the strip step'\''s own\n# build-time count, not here -- at run time CDI injects the host'\''s libs at the\n# same paths, so absence is not observable from inside a GPU-enabled container\n# (see the strip step'\''s comment).\n# nvidia-smi is a convenience binary the image keeps (CDI injects its own at\n# run time); reported, not required, because the Fedora arm does not ship it.\ncommand -v nvidia-smi \u003e/dev/null 2\u003e\u00261 \u0026\u0026 echo \"nvidia-smi present\" || echo \"nvidia-smi absent (injected by CDI at run time)\"\n"},"intent_do":"assert","exit_status":0}]},{"origin":"candy:github.com/opencharly/layer-cuda","description":"CUDA toolkit (nvcc, cudart, cuDNN, onnxruntime) stitched into the canonical /usr layout on Fedora and Arch\nInstalls the CUDA compiler driver (nvcc), the CUDA runtime/dev\nlibraries (cudart, nvrtc, cupti, curand, cccl, cufile), cuDNN, and\nonnxruntime. On Fedora the RPMs land in /usr directly; on Arch the\npost-install tasks symlink the /opt/cuda binaries, headers, and libs\ninto the same /usr-rooted paths, so every downstream GPU consumer\ncompiles against one layout regardless of distro. Each artifact is a\nreal file or library on disk, so its presence is directly verifiable.\n","plan":[{"run":"command=if [ ! -f /etc/fedora-release ]; then\n  exit 0\nfi\nCUDNN_DIR=$(mktemp -d)\ncd \"$CUDNN_DIR\"\nif dnf5 download --enable-repo=\"fedora-multimedia\" cuda-cudnn-devel 2\u003e/dev/null; then\n  rpm2cpio cuda-cudnn-devel*.rpm | cpio -idm 2\u003e/dev/null\n  [ -d ./usr/include ] \u0026\u0026 cp -v ./usr/include/cudnn*.h /usr/include/\n  while IFS= read -r -d '\'''\'' link; do\n    name=$(basename \"$link\")\n    versioned=\"\"\n    for v in /usr/lib64/\"${name}\".*; do\n      if [ -f \"$v\" ] \u0026\u0026 ! echo \"$v\" | grep -q '\''\\.so$'\''; then\n        versioned=\"$v\"; break\n      fi\n    done\n    [ -n \"$versioned\" ] \u0026\u0026 [ ! -e /usr/lib64/\"$name\" ] \u0026\u0026 ln -sv \"$(basename \"$versioned\")\" /usr/lib64/\"$name\"\n  done \u003c \u003c(find ./usr/lib64 -maxdepth 1 -name '\''*.so'\'' -type l -print0 2\u003e/dev/null)\nfi\ncd / \u0026\u0026 rm -rf \"$CUDNN_DIR\"\n","plugin":"command","plugin_input":{"command":"if [ ! -f /etc/fedora-release ]; then\n  exit 0\nfi\nCUDNN_DIR=$(mktemp -d)\ncd \"$CUDNN_DIR\"\nif dnf5 download --enable-repo=\"fedora-multimedia\" cuda-cudnn-devel 2\u003e/dev/null; then\n  rpm2cpio cuda-cudnn-devel*.rpm | cpio -idm 2\u003e/dev/null\n  [ -d ./usr/include ] \u0026\u0026 cp -v ./usr/include/cudnn*.h /usr/include/\n  while IFS= read -r -d '\'''\'' link; do\n    name=$(basename \"$link\")\n    versioned=\"\"\n    for v in /usr/lib64/\"${name}\".*; do\n      if [ -f \"$v\" ] \u0026\u0026 ! echo \"$v\" | grep -q '\''\\.so$'\''; then\n        versioned=\"$v\"; break\n      fi\n    done\n    [ -n \"$versioned\" ] \u0026\u0026 [ ! -e /usr/lib64/\"$name\" ] \u0026\u0026 ln -sv \"$(basename \"$versioned\")\" /usr/lib64/\"$name\"\n  done \u003c \u003c(find ./usr/lib64 -maxdepth 1 -name '\''*.so'\'' -type l -print0 2\u003e/dev/null)\nfi\ncd / \u0026\u0026 rm -rf \"$CUDNN_DIR\"\n"},"run_as":"root","intent_do":"act"},{"run":"command=if [ ! -f /etc/arch-release ]; then\n  exit 0\nfi\n# nvcc + cuobjdump + ptxas + nvprof — every binary in /opt/cuda/bin\nfor bin in /opt/cuda/bin/*; do\n  [ -e \"$bin\" ] \u0026\u0026 ln -sf \"$bin\" /usr/bin/$(basename \"$bin\")\ndone\n# Headers — cudnn*.h live in /opt/cuda/targets/x86_64-linux/include\n# on the cudnn package, while CUDA'\''s own headers live in\n# /opt/cuda/include. Symlink both into /usr/include.\n# Headers — link EVERY ENTRY of each toolkit include root, not a guessed subset.\n# nvcc computes its default include root RELATIVE to its own executable, and\n# /usr/bin/nvcc is a symlink, so all CUDA headers must be reachable under\n# /usr/include. Enumerating by pattern is what broke this: a `*.h` glob linked the\n# top-level headers but silently dropped (a) the SUBTREES crt/ and cccl/, which\n# killed every build at CMake'\''s enable_language(CUDA) with \"crt/host_config.h: No\n# such file or directory\", and then (b) the `.hpp` half of the `_functions` family\n# (`vector_functions.hpp` and friends), which killed the very next stage -- both\n# reported on opencharly/layer-cuda#9. Linking every entry needs no extension list\n# to keep in sync and cannot silently miss a file or a subtree again.\n# nvcc resolves its OWN helpers relative to its own executable path. Through the\n# /usr/bin/nvcc symlink that means /usr/\u003csibling\u003e/ — so the toolkit'\''s sibling TREES\n# must exist at /usr too, not only its files. Without /usr/nvvm, nvcc cannot find its\n# backend compiler at all: \"$CICC_PATH/cicc: No such file or directory\"\n# (/usr/sbin/../nvvm/bin/cicc), and every CUDA compile dies while PREPROCESSING\n# still succeeds — which is exactly how the check added in #10 stayed green through\n# it. Both halves of that lesson are fixed here.\nfor tree in nvvm; do\n  [ -d \"/opt/cuda/$tree\" ] \u0026\u0026 [ ! -e \"/usr/$tree\" ] \u0026\u0026 ln -sfn \"/opt/cuda/$tree\" \"/usr/$tree\"\ndone\nfor root in /opt/cuda/include /opt/cuda/targets/x86_64-linux/include; do\n  [ -d \"$root\" ] || continue\n  for entry in \"$root\"/*; do\n    [ -e \"$entry\" ] || continue\n    ln -sfn \"$entry\" /usr/include/\"$(basename \"$entry\")\"\n  done\ndone\n# Libraries: libcudart, libcudnn, libcurand, etc.\nmkdir -p /usr/lib64\n# Enumerate EVERY entry, not a `*.so*` glob. nvcc links the STATIC archives by\n# default (libcudart_static.a, libcudadevrt.a, libculibos.a, ...), and a `.so*`\n# pattern cannot match a `.a` — so the linker failed with \"cannot find\n# -lcudart_static: No such file or directory\" although the package ships the file\n# (opencharly/layer-cuda#12). Same defect shape as the `*.h` header glob that missed\n# `.hpp`: pattern-matching a directory instead of enumerating it.\nmkdir -p /usr/lib64\nfor libdir in /opt/cuda/targets/x86_64-linux/lib /opt/cuda/lib64; do\n  [ -d \"$libdir\" ] || continue\n  for entry in \"$libdir\"/*; do\n    [ -e \"$entry\" ] || continue\n    ln -sfn \"$entry\" /usr/lib64/\"$(basename \"$entry\")\"\n  done\ndone\n","plugin":"command","plugin_input":{"command":"if [ ! -f /etc/arch-release ]; then\n  exit 0\nfi\n# nvcc + cuobjdump + ptxas + nvprof — every binary in /opt/cuda/bin\nfor bin in /opt/cuda/bin/*; do\n  [ -e \"$bin\" ] \u0026\u0026 ln -sf \"$bin\" /usr/bin/$(basename \"$bin\")\ndone\n# Headers — cudnn*.h live in /opt/cuda/targets/x86_64-linux/include\n# on the cudnn package, while CUDA'\''s own headers live in\n# /opt/cuda/include. Symlink both into /usr/include.\n# Headers — link EVERY ENTRY of each toolkit include root, not a guessed subset.\n# nvcc computes its default include root RELATIVE to its own executable, and\n# /usr/bin/nvcc is a symlink, so all CUDA headers must be reachable under\n# /usr/include. Enumerating by pattern is what broke this: a `*.h` glob linked the\n# top-level headers but silently dropped (a) the SUBTREES crt/ and cccl/, which\n# killed every build at CMake'\''s enable_language(CUDA) with \"crt/host_config.h: No\n# such file or directory\", and then (b) the `.hpp` half of the `_functions` family\n# (`vector_functions.hpp` and friends), which killed the very next stage -- both\n# reported on opencharly/layer-cuda#9. Linking every entry needs no extension list\n# to keep in sync and cannot silently miss a file or a subtree again.\n# nvcc resolves its OWN helpers relative to its own executable path. Through the\n# /usr/bin/nvcc symlink that means /usr/\u003csibling\u003e/ — so the toolkit'\''s sibling TREES\n# must exist at /usr too, not only its files. Without /usr/nvvm, nvcc cannot find its\n# backend compiler at all: \"$CICC_PATH/cicc: No such file or directory\"\n# (/usr/sbin/../nvvm/bin/cicc), and every CUDA compile dies while PREPROCESSING\n# still succeeds — which is exactly how the check added in #10 stayed green through\n# it. Both halves of that lesson are fixed here.\nfor tree in nvvm; do\n  [ -d \"/opt/cuda/$tree\" ] \u0026\u0026 [ ! -e \"/usr/$tree\" ] \u0026\u0026 ln -sfn \"/opt/cuda/$tree\" \"/usr/$tree\"\ndone\nfor root in /opt/cuda/include /opt/cuda/targets/x86_64-linux/include; do\n  [ -d \"$root\" ] || continue\n  for entry in \"$root\"/*; do\n    [ -e \"$entry\" ] || continue\n    ln -sfn \"$entry\" /usr/include/\"$(basename \"$entry\")\"\n  done\ndone\n# Libraries: libcudart, libcudnn, libcurand, etc.\nmkdir -p /usr/lib64\n# Enumerate EVERY entry, not a `*.so*` glob. nvcc links the STATIC archives by\n# default (libcudart_static.a, libcudadevrt.a, libculibos.a, ...), and a `.so*`\n# pattern cannot match a `.a` — so the linker failed with \"cannot find\n# -lcudart_static: No such file or directory\" although the package ships the file\n# (opencharly/layer-cuda#12). Same defect shape as the `*.h` header glob that missed\n# `.hpp`: pattern-matching a directory instead of enumerating it.\nmkdir -p /usr/lib64\nfor libdir in /opt/cuda/targets/x86_64-linux/lib /opt/cuda/lib64; do\n  [ -d \"$libdir\" ] || continue\n  for entry in \"$libdir\"/*; do\n    [ -e \"$entry\" ] || continue\n    ln -sfn \"$entry\" /usr/lib64/\"$(basename \"$entry\")\"\n  done\ndone\n"},"run_as":"root","intent_do":"act"},{"run":"drop the driver user-space the cuda package reinstalls through nvidia-utils, so the CDI mount is its only provider","plugin":"command","id":"cuda-drop-driver-userspace","plugin_input":{"command":"set -eu\nremoved=0\nfor d in /usr/lib /usr/lib64; do\n  if [ ! -d \"$d\" ] || [ -L \"$d\" ]; then continue; fi\n  out=$(find \"$d\" -maxdepth 1 \\( -name '\''libnvidia-*.so*'\'' -o -name '\''libcuda*.so*'\'' \\\n        -o -name '\''libnvcuvid.so*'\'' -o -name '\''libnvoptix.so*'\'' -o -name '\''libGLX_nvidia.so*'\'' \\\n        -o -name '\''libEGL_nvidia.so*'\'' -o -name '\''libGLESv1_CM_nvidia.so*'\'' \\\n        -o -name '\''libGLESv2_nvidia.so*'\'' \\) -print -delete 2\u003e/dev/null || true)\n  n=$(printf '\''%s\\n'\'' \"$out\" | grep -c . || true)\n  removed=$((removed + n))\ndone\nrm -rf /usr/lib/nvidia /usr/lib/vdpau /usr/lib/xorg/modules/drivers/nvidia_drv.so\necho \"dropped $removed driver library file(s) plus the xorg/vdpau driver trees\"\n# The BINARIES are host-coupled in exactly the same way, and the CDI injection\n# mounts them too (measured in a live pod: nvidia-smi, nvidia-cuda-mps-control,\n# nvidia-cuda-mps-server, nvidia-debugdump, nvidia-persistenced, nvidia-xconfig\n# are all bind-mounted from the host). A baked copy is a second, wrong-version\n# one, and for nvidia-smi it is actively misleading: it reports on the image'\''s\n# own libraries instead of the ones injected with the running driver.\n#\n# This deletes the WHOLE `nvidia*` set rather than a hand-listed subset. A\n# subset is how this step first shipped and its own assertion caught three\n# leftovers it had missed (nvidia-container-toolkit and its two\n# nvidia-container-runtime.\u003cvariant\u003e wrappers) -- because the package also\n# ships nvidia-ngx-updater, nvidia-pcc, nvidia-powerd and nvidia-sleep.sh, and\n# a list that has to be right about every one of them will be wrong again.\n# None of them belong in an image: the NVIDIA CONTAINER TOOLKIT is HOST\n# tooling -- it generates the CDI spec and lives on the operator'\''s machine --\n# so an image copy is a second, drifting one that nothing runs.\nbinned=0\nfor d in /usr/bin /usr/local/bin /usr/sbin; do\n  if [ ! -d \"$d\" ]; then continue; fi\n  out=$(find \"$d\" -maxdepth 1 \\( -type f -o -type l \\) -name '\''nvidia*'\'' \\\n        -print -delete 2\u003e/dev/null || true)\n  n=$(printf '\''%s\\n'\'' \"$out\" | grep -c . || true)\n  binned=$((binned + n))\ndone\necho \"dropped $binned host-coupled nvidia binary/binaries\"\nleft=$(find /usr/lib /usr/lib64 -maxdepth 1 \\( -type f -o -type l \\) \\\n    \\( -name '\''libnvidia-*.so*'\'' -o -name '\''libcuda*.so*'\'' -o -name '\''libnvcuvid.so*'\'' \\\n    -o -name '\''libnvoptix.so*'\'' -o -name '\''libGLX_nvidia.so*'\'' \\\n    -o -name '\''libEGL_nvidia.so*'\'' -o -name '\''libGLESv1_CM_nvidia.so*'\'' \\\n    -o -name '\''libGLESv2_nvidia.so*'\'' \\) 2\u003e/dev/null | wc -l)\nbleft=0\nfor d in /usr/bin /usr/local/bin /usr/sbin; do\n  if [ ! -d \"$d\" ]; then continue; fi\n  n=$(find \"$d\" -maxdepth 1 \\( -type f -o -type l \\) -name '\''nvidia*'\'' 2\u003e/dev/null | wc -l)\n  bleft=$((bleft + n))\ndone\necho \"driver library files still baked after the strip: $left\"\necho \"host-coupled nvidia binaries still baked after the strip: $bleft\"\ntest \"$left\" -eq 0 || exit 1\ntest \"$bleft\" -eq 0 || exit 1\n"},"run_as":"root","intent_do":"act"},{"check":"the nvcc CUDA compiler driver is on the canonical /usr path","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/nvcc"},"intent_do":"assert"},{"check":"nvcc reports its CUDA compilation-tools release","plugin":"command","plugin_input":{"command":"nvcc --version"},"intent_do":"assert","exit_status":0,"stdout":[{"op":"contains","value":"release"}]},{"check":"the cuDNN header is available at /usr/include regardless of distro","plugin":"file","plugin_input":{"exists":true,"file":"/usr/include/cudnn.h"},"intent_do":"assert"},{"check":"a CUDA translation unit COMPILES AND LINKS against the stitched /usr layout (Arch: the header subtrees are linked, not only the top-level files)","plugin":"command","id":"cuda-arch-header-root","plugin_input":{"command":"[ -f /etc/arch-release ] || exit 0\ntest -f /usr/include/crt/host_config.h || exit 1\nprintf '\''int main(void){return 0;}\\n'\'' \u003e /tmp/chkcuda.cu\nnvcc -x cu -o /tmp/chkcuda /tmp/chkcuda.cu\nrc=$?\nrm -f /tmp/chkcuda.cu\nexit $rc\n"},"intent_do":"assert"},{"check":"the CUDA runtime library is linkable from the canonical /usr/lib64 path","plugin":"command","plugin_input":{"command":"ls /usr/lib64/libcudart.so*"},"intent_do":"assert","exit_status":0},{"agent-check":"downstream GPU layers (llama-cpp, vllm, comfyui, jupyter-ml) compile against the same /usr-rooted CUDA layout on both Fedora and Arch"},{"check":"package=cuda-cudart-devel","plugin":"package","id":"cuda-cudart-package","plugin_input":{"installed":true,"package":"cuda-cudart-devel","package_map":{"arch":"cuda","fedora":"cuda-cudart-devel"}},"intent_do":"assert"},{"check":"command=ls /usr/include/cudnn.h","plugin":"command","id":"cudnn-header","plugin_input":{"command":"ls /usr/include/cudnn.h"},"intent_do":"assert","exit_status":0},{"check":"package=onnxruntime","plugin":"package","id":"onnxruntime-package","plugin_input":{"installed":true,"package":"onnxruntime","package_map":{"arch":"python-onnxruntime-cpu","fedora":"onnxruntime"}},"intent_do":"assert"}]},{"origin":"candy:github.com/opencharly/layer-cdi","description":"The CDI runtime contract for GPU images, and the ONLY layer that owns it.\n\nA GPU container does not get its driver from the image: the kernel module is\nhost-global, so the driver user-space must come from the host, injected per container\n(`--device nvidia.com/gpu=all`, via the NVIDIA container toolkit'\''s CDI spec and its\nruntime hook). An image that bakes its own driver user-space does not merely duplicate\nthat — it WINS the SONAME resolution, because the injection mounts the host'\''s VERSIONED\nfiles (libnvidia-ml.so.615.78.08, ...) and the image'\''s own newer copy\n(libnvidia-ml.so.620.70.06) stays visible next to them, so `libnvidia-ml.so.1` resolves\nto the baked one. `nvidia-smi` then exits 18 with \"Driver/library version mismatch\", and\nevery consumer that estimates free memory through NVML — ollama among them — silently\ndegrades to CPU while answering normally. Measured on CachyOS, October 2026:\nhost module 615.78.08 against a baked userspace 620.70.06, ollama offloading 0/29\nlayers. opencharly/layer-cuda#21.\n\nSo this layer does exactly three things, and every GPU image composes it:\n\n  1. REMOVES the host-coupled driver user-space and the `nvidia*` binaries that a\n     distro package manager installs as a side effect of installing the CUDA toolkit\n     (`pacman -S cuda` depends on `nvidia-utils`; `dnf install cuda-nvcc` pulls\n     `nvidia-driver` userspace on some distros).\n  2. PROVES, at build time and again at check time, that none of them remain — including\n     the versioned files, because the CDI create-symlinks hook re-creates each SONAME\n     link from whatever versioned file it finds.\n  3. PROVES, at check time, that the container actually resolved the INJECTED driver and\n     that its version equals the running kernel module'\''s.\n\nWhat this layer deliberately does NOT remove: the Vulkan/OpenCL ICD JSONs. They name a\nSONAME (`libGLX_nvidia.so.0`), not a version, so the link the injection creates\nsatisfies them — which is why they are part of the contract rather than a violation of\nit.\n","plan":[{"run":"no host-coupled driver library is baked — the injection is the only provider","plugin":"command","id":"cdi-no-baked-driver-libs","plugin_input":{"command":"set -eu\n# The directories are overridable so the assertion can be EXECUTED against fixtures\n# (and so a bed can prove it discriminates) without a GPU or an image build. The\n# default is the image'\''s own layout.\n# THREE surfaces, because the removal touches three: the top-level libraries, the\n# driver TREES the packages ship (nvidia/, vdpau/ — where libvdpau_nvidia.so lives),\n# and the xorg driver. An assertion that only counts the first surface passes on an\n# image whose vdpau/xorg driver content survived, which is exactly what the deleted\n# strip'\''s `rm -rf` lines existed to remove.\nlibs=${CDI_LIB_DIRS:-/usr/lib /usr/lib64}\ntrees=${CDI_TREE_DIRS:-/usr/lib/nvidia /usr/lib64/nvidia /usr/lib/vdpau}\nxorg=${CDI_XORG_DRIVER:-/usr/lib/xorg/modules/drivers/nvidia_drv.so}\nleft=0\nfor d in $libs; do\n  [ -d \"$d\" ] || continue\n  n=$(find \"$d\" -maxdepth 1 \\( -type f -o -type l \\) \\\n      \\( -name '\''libnvidia-*.so*'\'' -o -name '\''libcuda*.so*'\'' -o -name '\''libnvcuvid.so*'\'' \\\n      -o -name '\''libnvoptix.so*'\'' -o -name '\''libGLX_nvidia.so*'\'' \\\n      -o -name '\''libEGL_nvidia.so*'\'' -o -name '\''libGLESv1_CM_nvidia.so*'\'' \\\n      -o -name '\''libGLESv2_nvidia.so*'\'' -o -name '\''libvdpau_nvidia.so*'\'' \\) 2\u003e/dev/null | wc -l)\n  left=$((left + n))\ndone\nfor d in $trees; do\n  [ -d \"$d\" ] || continue\n  n=$(find \"$d\" \\( -type f -o -type l \\) 2\u003e/dev/null | wc -l)\n  left=$((left + n))\ndone\nif [ -e \"$xorg\" ] || [ -L \"$xorg\" ]; then left=$((left + 1)); fi\necho \"cdi: driver libraries still baked: $left\"\ntest \"$left\" -eq 0\n"},"run_as":"root","intent_do":"act"},{"run":"no host-coupled nvidia binary is baked — the injection is the only provider","plugin":"command","id":"cdi-no-baked-driver-binaries","plugin_input":{"command":"set -eu\nbins=${CDI_BIN_DIRS:-/usr/bin /usr/local/bin /usr/sbin}\nleft=0\nfor d in $bins; do\n  [ -d \"$d\" ] || continue\n  n=$(find \"$d\" -maxdepth 1 \\( -type f -o -type l \\) -name '\''nvidia*'\'' 2\u003e/dev/null | wc -l)\n  left=$((left + n))\ndone\necho \"cdi: nvidia binaries still baked: $left\"\ntest \"$left\" -eq 0\n"},"run_as":"root","intent_do":"act"},{"check":"the container resolved the INJECTED host driver, and its version equals the running kernel module'\''s","plugin":"command","id":"cdi-injected-driver-matches-module","context":["runtime"],"plugin_input":{"command":"set -eu\nlib=$(ls /usr/lib/libnvidia-ml.so.1 2\u003e/dev/null || true)\n[ -n \"$lib\" ] || { echo \"cdi: no libnvidia-ml.so.1 — nothing was injected\"; exit 1; }\nuv=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2\u003e/dev/null | head -1 | tr -d '\'' '\'')\nkm=$(grep -oE '\''[0-9]+\\.[0-9]+(\\.[0-9]+)?'\'' /proc/driver/nvidia/version 2\u003e/dev/null | head -1 || true)\necho \"cdi: userspace=$uv kernel-module=$km lib=$(readlink -f \"$lib\")\"\n[ -n \"$uv\" ] || { echo \"cdi: nvidia-smi did not report a driver version\"; exit 1; }\n[ \"$uv\" = \"$km\" ] || { echo \"cdi: DRIVER/LIBRARY MISMATCH — an image library shadows the injected host driver\"; exit 1; }\n"},"intent_do":"assert","exit_status":0}]},{"origin":"candy:github.com/opencharly/layer-ssh-client","description":"OpenSSH client tools for SSH agent forwarding\nssh-client installs the OpenSSH client package (openssh-clients on\nFedora, openssh-client on Debian/Ubuntu, openssh on Arch) providing\nthe ssh, ssh-add, ssh-keygen, scp and sftp binaries at /usr/bin.\nBoxes compose it (directly or via the agent-forwarding metalayer) so\nin-container ssh and git can reach hosts through the host'\''s forwarded\nSSH agent socket. The observable, verifiable effect is that the client\nbinaries are present and `ssh -V` reports the OpenSSH banner on stderr.\n","plan":[{"check":"the ssh client binary is installed at /usr/bin/ssh so in-container git and ssh can connect out","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/ssh"},"intent_do":"assert"},{"check":"ssh-add is installed so the forwarded host agent'\''s keys can be loaded and listed","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/ssh-add"},"intent_do":"assert"},{"check":"ssh-keygen is installed for generating and inspecting key material","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/ssh-keygen"},"intent_do":"assert"},{"check":"ssh -V identifies the client as OpenSSH on stderr and exits cleanly","plugin":"command","plugin_input":{"command":"/usr/bin/ssh -V"},"intent_do":"assert","exit_status":0,"stderr":[{"op":"contains","value":"OpenSSH"}]},{"agent-check":"with a host SSH agent forwarded at runtime, ssh-add -l inside the deployment lists the host'\''s keys via the forwarded SSH_AUTH_SOCK"},{"check":"package=openssh-client","plugin":"package","id":"ssh-client-package","plugin_input":{"installed":true,"package":"openssh-client","package_map":{"arch":"openssh","fedora":"openssh-clients"}},"intent_do":"assert"}]},{"origin":"candy:github.com/opencharly/layer-agent-forwarding","description":"Agent forwarding support — GPG, SSH, and direnv client tooling for the .secrets workflow\nagent-forwarding is a pure composition candy: it installs nothing of\nits own but pulls in gnupg, direnv, and ssh-client so a box can USE\nhost GPG and SSH agent sockets that are bind-mounted from the host at\n`charly shell` / `charly start` (direct mode) runtime. The observable,\nverifiable effect of the composition is that the gpg, ssh, ssh-add,\nand direnv client binaries are all present in any box that composes\nthis candy — that is what the scenarios and check block assert.\n","plan":[{"check":"the GnuPG client binary is installed so a forwarded host GPG agent socket can be used for signing and decryption","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/gpg"},"intent_do":"assert"},{"check":"the SSH client is installed so git and ssh use the forwarded host SSH agent","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/ssh"},"intent_do":"assert"},{"check":"ssh-add is installed so the forwarded host agent'\''s keys can be listed","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/ssh-add"},"intent_do":"assert"},{"check":"the direnv binary is installed for the .secrets/.envrc autoload workflow","plugin":"file","plugin_input":{"exists":true,"file":"/usr/bin/direnv"},"intent_do":"assert"},{"agent-check":"with a host SSH agent forwarded at runtime, ssh-add -l inside the deployment lists the host'\''s keys"},{"check":"package=gnupg","plugin":"package","id":"agent-forwarding-gnupg-package","plugin_input":{"installed":true,"package":"gnupg","package_map":{"fedora":"gnupg2"}},"intent_do":"assert"},{"check":"package=openssh-client","plugin":"package","id":"agent-forwarding-ssh-client-package","plugin_input":{"installed":true,"package":"openssh-client","package_map":{"arch":"openssh","fedora":"openssh-clients"}},"intent_do":"assert"},{"check":"package=direnv","plugin":"package","id":"agent-forwarding-direnv-package","plugin_input":{"installed":true,"package":"direnv"},"intent_do":"assert"},{"check":"command=/usr/bin/gpg --version","plugin":"command","id":"agent-forwarding-gpg-runs","plugin_input":{"command":"/usr/bin/gpg --version"},"intent_do":"assert","exit_status":0,"stdout":[{"op":"contains","value":"gpg (GnuPG)"}]},{"check":"command=/usr/bin/direnv version","plugin":"command","id":"agent-forwarding-direnv-runs","plugin_input":{"command":"/usr/bin/direnv version"},"intent_do":"assert","exit_status":0}]}],"box":[{"origin":"box:pod-cdi","description":"CDI GPU pod base — the container contract for GPU workloads, and the pod sibling\nof opencharly/vm-nvidia.\n\nA GPU container gets its driver from the HOST, not from the image: the kernel\nmodule is host-global, so the driver user-space is injected per container by the\nruntime from the NVIDIA container toolkit'\''s CDI spec. This box therefore composes\nlayer-cdi, which owns that contract and whose plan steps FAIL the build if any\nhost-coupled driver library or nvidia binary is baked in — the boundary is\nenforced, not merely documented.\n\nIt deliberately contains NO nvidia-utils, NO LD_LIBRARY_PATH export and NO\nnvidia-ctk: those belong to opencharly/vm-nvidia, where the guest owns its own\nkernel module and must bake the driver. Mixing the two contracts is what made\nevery GPU pod demand a host tool in its image; measured 2026-11-18, a pod on this\ncontract serves CUDA with no /usr/bin/nvidia-ctk present.\n"}]}'
+LABEL ai.opencharly.shell='{"candy":[{"origin":"github.com/opencharly/layer-direnv","id":"github.com/opencharly/layer-direnv","generic":{"init":"eval \"$(direnv hook ${SHELL_NAME})\"\n"},"by_shell":{"fish":{"init":"direnv hook fish | source\n"},"sh":{}}}]}'
+LABEL ai.opencharly.env_candy='{"CUDA_HOME":"/usr","LD_LIBRARY_PATH":"/usr/lib64"}'
+LABEL ai.opencharly.status="testing"
+LABEL ai.opencharly.check_level="noagent"
+LABEL ai.opencharly.info='CDI GPU pod base — the container contract for GPU workloads, and the pod sibling; github.com/opencharly/layer-ffmpeg: FFmpeg provides command-line audio/video transcoding and media inspection; github.com/opencharly/layer-gnupg: GnuPG encryption and signing tools for GPG agent forwarding; github.com/opencharly/layer-direnv: direnv — automatic per-directory environment loading from .envrc files; github.com/opencharly/layer-nvidia: NVIDIA GPU runtime — nvidia-container-toolkit (nvidia-ctk CDI) plus the driver-lib path and Vulkan ICD wiring; github.com/opencharly/layer-cuda: CUDA toolkit (nvcc, cudart, cuDNN, onnxruntime) stitched into the canonical /usr layout on Fedora and Arch; github.com/opencharly/layer-ssh-client: OpenSSH client tools for SSH agent forwarding; github.com/opencharly/layer-agent-forwarding: Agent forwarding support — GPG, SSH, and direnv client tooling for the .secrets workflow; github.com/opencharly/layer-cdi: The CDI runtime contract for GPU images, and the ONLY layer that owns it.'
+LABEL ai.opencharly.candy_version='{"github.com/opencharly/layer-agent-forwarding":"v2026.274.0608","github.com/opencharly/layer-cdi":"v2026.322.1100","github.com/opencharly/layer-cuda":"v2026.321.1520","github.com/opencharly/layer-direnv":"v2026.272.0057","github.com/opencharly/layer-ffmpeg":"v2026.272.0056","github.com/opencharly/layer-gnupg":"v2026.272.0138","github.com/opencharly/layer-nvidia":"v2026.320.1938","github.com/opencharly/layer-ssh-client":"v2026.272.0430"}'
+

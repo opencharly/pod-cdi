@@ -1,0 +1,166 @@
+---
+name: nvidia-layer
+description: 'NVIDIA GPU runtime support: driver libs, nvidia-container-toolkit (CDI),
+  and VA-API.
+
+  Fedora (negativo17) and Arch Linux (pac). Base candy for all GPU-accelerated boxes.
+
+  Use when working with NVIDIA GPU support, CDI device injection, or the nvidia candy.'
+---
+
+# nvidia -- NVIDIA GPU runtime
+
+NVIDIA runtime candy providing `nvidia-container-toolkit` for CDI device injection and VA-API hardware video acceleration. Driver userspace libraries (libcuda, libnvidia-ml, etc.) are NOT bundled — CDI provides host-matching driver libs at runtime, preventing version mismatches between container and host kernel module. Supports both Fedora and Arch Linux.
+
+## Candy Properties
+
+| Property | Value |
+|----------|-------|
+| Install files | `charly.yml`, `task:` |
+| Depends | none |
+
+## Packages
+
+**RPM** (from negativo17 fedora-multimedia repo):
+- `nvidia-container-toolkit` — `nvidia-ctk` CLI for CDI spec generation
+- `libva-nvidia-driver` — VA-API hardware video acceleration
+
+**PAC** (Arch Linux):
+- `nvidia-utils` — installed for its NON-driver assets (the Vulkan ICD JSON this
+  candy wires, and `nvidia-smi`); the host-coupled driver libraries it also carries
+  are removed by a plan step — see "Driver user-space is not bundled" below
+- `nvidia-container-toolkit` — `nvidia-ctk` CLI for CDI spec generation
+
+### Driver user-space is not bundled — and on Arch that is now ENFORCED
+
+The contract at the top of this page is not a description, it is a rule: the image
+carries no driver user-space, because the kernel-module-coupled part of it MUST come
+from the host. The Fedora arm satisfies it by construction (`libva-nvidia-driver`
+ships no driver libraries). The Arch arm did not, and the failure is subtle enough
+to be worth recording.
+
+`nvidia-utils` installs the whole driver user-space (~89 files under `/usr/lib`:
+`libnvidia-ml`, `libcuda`, `libnvidia-glcore`, the EGL/GLX/GLES entry points, …).
+NVIDIA's CDI `create-symlinks` hook then points each SONAME at the **newest**
+versioned copy present *inside the container* — so the image's copy wins over the
+one the mount injected. On a host whose kernel driver is older than the distro's
+package, NVML then talks to a module it does not match:
+
+```
+$ nvidia-smi -L                      # inside a cachyos ollama image, host driver 615.78.08
+Failed to initialize NVML: Driver/library version mismatch
+NVML library version: 620.70
+$ ls -l /usr/lib/libnvidia-ml.so*
+/usr/lib/libnvidia-ml.so.1 -> libnvidia-ml.so.620.70.06      # baked by nvidia-utils
+/usr/lib/libnvidia-ml.so.615.78.08                           # injected by CDI
+```
+
+CUDA kept working (the injected `libcuda` is what runs), so the breakage is confined
+to NVML: `nvidia-smi`, and every Vulkan/EGL consumer on a skewed host.
+
+One plan step holds the rule now. `nvidia-drop-driver-userspace` removes exactly the set
+the CDI spec injects (keeping the Vulkan ICD and `nvidia-smi`) and asserts the result in
+the SAME `run:` — it prints how many driver libraries are still present and fails the
+build if the count is not zero. That step executes in the BUILD container, where no CDI
+has injected anything, so a remaining match is unambiguously image content; the enforcement
+is deliberately not a separate `check:` step, because a check runs in a container the GPU
+seam may attach, where the host's libs sit at the same paths and only
+`/proc/self/mountinfo` could tell them apart — and that is not readable on every venue (a
+mount-info probe went red on a CORRECT fedora image for exactly that reason). The count
+covers files AND symlinks, because the failure this replaced WAS a symlink
+(`libnvidia-ml.so.1 -> libnvidia-ml.so.620.70.06`).
+
+The separate check that survived is `nvidia-distro-runtime-assets`, rewritten in the same
+change: the old form asserted that the driver libraries were present (it listed
+`/usr/lib/libnvidia*` and required `nvidia` in the output), which is the contract violation
+itself, and it went red on a correct image the moment the strip landed. It now asserts
+PRESENCE of the distro's own asset — the Vulkan ICD JSON on Arch, the VA-API driver on
+Fedora — rather than accepting any one of a set. It deliberately does not assert the ABSENCE
+of the driver libraries: at run time CDI injects the host's copies at the same paths, so
+absence is only observable in the build container, which is where the strip's own count
+asserts it. The ICD step above it had the matching defect in
+the other direction: it tested only Fedora's `nvidia_icd.x86_64.json` filename, so on
+Arch/CachyOS (which ship `nvidia_icd.json`) it silently wired nothing; it now accepts
+either name and says which one it linked.
+Nothing in the library links against a driver stub at build time, so no consumer loses
+a build capability.
+
+## Environment Variables
+
+| Variable | Value |
+|----------|-------|
+| `LD_LIBRARY_PATH` | `/usr/lib64` (ensures CDI-injected host driver libs are found by the dynamic linker) |
+
+## CDI Support
+
+The `nvidia-container-toolkit` provides `nvidia-ctk` which generates CDI (Container Device Interface) specs. `charly` triggers CDI regeneration plugin-side (`pluginEnsureCDI` in `candy/plugin-preempt/holder_dispatch.go`, via `spec.GpuSwitchActionEnsureCDI` — the former in-core `EnsureCDI()` shim is DELETED, K-wave 2 cone R3) before launching containers with GPU — if CDI specs don't exist at `/etc/cdi/nvidia.yaml`, it runs `nvidia-ctk cdi generate` to create them. This enables GPU access in nested containers where host CDI specs are not inherited.
+
+### Build-time noise on GPU-less hosts (Arch)
+
+Arch's `nvidia-container-toolkit` ships a pacman post-install hook that
+invokes `nvidia-ctk cdi generate`. On a host with no NVIDIA driver
+loaded (e.g., an AMD-only build host), the hook fails NVML init:
+
+```
+ERROR: failed to generate CDI spec: failed to initialize NVML: Driver Not Loaded
+error: command failed to execute correctly
+```
+
+This is **benign for the build** — pacman still exits 0 (hooks don't
+affect the parent transaction's status), the candy finishes installing,
+and the resulting image works at runtime on a GPU-bearing host (where
+the CDI spec is generated via `pluginEnsureCDI` (`candy/plugin-preempt`) at container-launch time,
+not build time). You can ignore the error message. RPM installs don't
+trigger the hook, so Fedora-based boxes don't see this noise.
+
+If you ever build inside CI where even-benign hook errors matter,
+either build arch-nvidia images on a GPU-bearing runner, or patch the
+candy to carry a build-time `NVIDIA_VISIBLE_DEVICES=void` env var so
+nvidia-ctk skips CDI gen.
+
+## DRINODE Auto-Injection
+
+NVIDIA VAAPI acceleration requires the container to know which DRM render node to bind the EGL context against. On multi-GPU hosts there may be `/dev/dri/renderD128`, `/dev/dri/renderD129`, … and the correct one depends on which physical card backs the NVIDIA driver.
+
+`charly` does **not** bake a hardcoded `DRINODE=/dev/dri/renderD128` into this candy. Instead, it auto-detects the correct render node at container-launch time and injects it as an environment variable. The detection + injection is consolidated in a single function, `appendAutoDetectedEnv()` in `candy/plugin-deploy-pod/config_setup_helpers.go` (relocated wholesale from charly-core's `charly/devices.go` in the dead-code-radical-removal batch), which is called by `charly config`, `charly start`, and `charly shell` via that candy's own `config_setup.go` / `resolve.go` / `resolve_f12.go` resolvers — so the commands always produce the same env set.
+
+Selkies is the primary consumer: pixelflux's Wayland compositor uses `DRINODE` to open the render node and set up the VAAPI H.264 encoder. Without the injection, selkies would fall back to software encode (`libx264`) and lose ~40% of its streaming bandwidth budget.
+
+GPU device injection is consolidated into the single `appendAutoDetectedEnv()` function rather than scattered across the `charly` source tree. If you see `DRINODE` referenced in candy scripts, you can assume it was auto-detected and injected by `charly`, not set by the user.
+
+See `/charly-core:charly-doctor` (Hardware Detection) for the detection probe and `/charly-distros:rocm` for the AMD-side counterpart using the same mechanism.
+
+### Cross-GPU portability (nvidia-base boxes on AMD hosts)
+
+Boxes that declare `base: nvidia` (e.g., `/charly-selkies:selkies-labwc-nvidia`) still run cleanly on hosts with a different GPU vendor — the NVIDIA runtime libraries ride along as benign passengers. `charly config` auto-detects whatever the host actually exposes (e.g., `/dev/dri/renderD128` + `/dev/kfd` for an AMD RDNA3), injects those device nodes + `DRINODE`, and Mesa handles rendering. For example, `selkies-labwc-nvidia` (base: nvidia) runs on an AMD `gfx 11.0.0` host — all supervisord programs RUNNING, selkies streaming over Mesa, no CUDA calls attempted. The CUDA toolkit in the box simply goes unused.
+
+## Install tasks
+
+Creates Vulkan ICD compatibility symlinks for nvidia-ctk CDI device injection.
+
+## Used In Boxes
+
+- `/charly-distros:nvidia` — Fedora NVIDIA GPU base image (nvidia + cuda candies)
+- `/charly-distros:cachyos` — `cachyos.nvidia`, the CachyOS GPU base (cachyos + agent-forwarding + nvidia + cuda); the nvidia/cuda candies being multi-distro (rpm + pac) is what lets this Arch/CachyOS GPU base reuse them unchanged
+- `/charly-coder:charly-arch` — Arch Linux charly toolchain (shared candies + nvidia)
+- `/charly-distros:charly-fedora` — Fedora charly toolchain (shared candies + nvidia)
+
+## Related Candies
+
+- `/charly-distros:cuda` — CUDA development toolkit (depends on nvidia)
+- `/charly-distros:rocm` — AMD GPU counterpart (ROCm runtime + OpenCL), uses the same `appendAutoDetectedEnv()` DRINODE injection
+- `/charly-selkies:selkies` — Primary consumer of the DRINODE env for VAAPI H.264 encode
+- `/charly-languages:python-ml`, `/charly-jupyter:llama-cpp`, `/charly-jupyter:jupyter-ml` — CUDA ML stacks that depend on this candy
+
+## Related Commands
+
+- `/charly-core:charly-doctor` — Host NVIDIA detection (GPU probe, CDI spec status, driver version)
+- `/charly-core:shell` — DRINODE auto-injection applies to interactive shells too
+- `/charly-automation:udev` — Device permission management for `/dev/dri/*` and `/dev/nvidia*`
+- `/charly-core:charly-config` — Runtime GPU device injection at deployment time (same `appendAutoDetectedEnv()` path)
+- `/charly-core:start` — Runtime GPU device injection at service start time
+
+## Related
+
+- `/charly-image:layer` — candy authoring reference (`charly.yml` schema, task verbs, service declarations)
+- `/charly-check:check` — declarative testing (`check:` block, `charly check box`, `charly check live`)
