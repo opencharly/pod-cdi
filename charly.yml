@@ -1,0 +1,54 @@
+#  opencharly/pod-cdi — the CDI GPU POD base box.
+#
+#  A POD DOES NOT OWN ITS GPU DRIVER. The kernel module is host-global, so the driver
+#  user-space must come from the HOST and be injected per container by the container
+#  runtime, through the NVIDIA container toolkit's CDI spec (`/etc/cdi/nvidia.yaml`,
+#  generated on the host by `nvidia-ctk cdi generate`) and its runtime hook. An image
+#  that bakes its own driver user-space does not merely duplicate the host's — it
+#  shadows it, and `nvidia-container-toolkit` / `nvidia-ctk` are HOST tools that never
+#  execute inside a container.
+#
+#  That is why this box composes `layer-cdi` and NEVER `layer-nvidia`:
+#    layer-cdi     -> the POD contract: host-injected driver, no baked user-space,
+#                      no nvidia binary in the image. Its own plan steps FAIL the build
+#                      if a host-coupled driver library or nvidia binary is baked.
+#    layer-nvidia  -> the VM contract: driver baked into the image, nvidia-ctk present.
+#                      Correct for opencharly/vm-nvidia, wrong for anything here.
+#
+#  Measured (2026-11-18): a pod built on this contract serves CUDA with NO
+#  `/usr/bin/nvidia-ctk` in its image —
+#    ComfyUI logs: "Device: cuda:0 NVIDIA GeForce RTX 4080 SUPER", "Total VRAM 16027 MB"
+#  — while the host carries the toolkit and the spec:
+#    /usr/bin/nvidia-ctk, /etc/cdi/nvidia.yaml (27076 bytes).
+#
+#  Consumers (all pods): box/comfyui, box/versa, box/selkies-kde-nvidia,
+#  box/selkies-labwc-nvidia in opencharly/distro-cachyos.
+
+import:
+    # The CachyOS base image family. One-directional: distro-cachyos imports nothing back.
+    - cachyos: '@github.com/opencharly/distro-cachyos:v2026.322.1210'
+
+pod-cdi:
+    candy:
+        description: |
+            CDI GPU pod base — the container contract for GPU workloads, and the pod sibling
+            of opencharly/vm-nvidia.
+
+            A GPU container gets its driver from the HOST, not from the image: the kernel
+            module is host-global, so the driver user-space is injected per container by the
+            runtime from the NVIDIA container toolkit's CDI spec. This box therefore composes
+            layer-cdi, which owns that contract and whose plan steps FAIL the build if any
+            host-coupled driver library or nvidia binary is baked in — the boundary is
+            enforced, not merely documented.
+
+            It deliberately contains NO nvidia-utils, NO LD_LIBRARY_PATH export and NO
+            nvidia-ctk: those belong to opencharly/vm-nvidia, where the guest owns its own
+            kernel module and must bake the driver. Mixing the two contracts is what made
+            every GPU pod demand a host tool in its image; measured 2026-11-18, a pod on this
+            contract serves CUDA with no /usr/bin/nvidia-ctk present.
+        base: cachyos.cachyos
+        platform:
+            - linux/amd64
+        candy:
+            - '@github.com/opencharly/layer-agent-forwarding:v2026.274.0608'
+            - '@github.com/opencharly/layer-cdi:v2026.322.1100'
