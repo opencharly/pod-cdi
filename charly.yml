@@ -27,6 +27,11 @@
 import:
     # The CachyOS base image family. One-directional: distro-cachyos imports nothing back.
     - cachyos: '@github.com/opencharly/distro-cachyos:v2026.322.1045'
+    # A builder map does NOT cross a namespace boundary (distro-cachyos's box/cachyos states
+    # this outright): a consumer that builds must declare its own. Without this entry the box
+    # validates from its own repo but FAILS when a consumer composes it, with
+    #   box "comfyui": candy "pod-comfyui" needs builder "pixi" but no builder.pixi configured
+    - arch: '@github.com/opencharly/distro-arch:v2026.274.1256'
 
 pod-cdi:
     candy:
@@ -49,6 +54,15 @@ pod-cdi:
         base: cachyos.cachyos
         platform:
             - linux/amd64
+        # Declared HERE, not inherited: builder maps do not cross a namespace boundary, so a
+        # box that is composed by a consumer must carry its own map or the consumer fails.
+        build:
+            - pac
+        builder:
+            aur: arch.arch-builder
+            cargo: arch.arch-builder
+            npm: arch.arch-builder
+            pixi: arch.arch-builder
         candy:
             - '@github.com/opencharly/layer-agent-forwarding:v2026.274.0608'
             - '@github.com/opencharly/layer-cdi:v2026.322.1100'
