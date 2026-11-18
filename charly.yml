@@ -25,12 +25,8 @@
 #  box/selkies-labwc-nvidia in opencharly/distro-cachyos.
 
 import:
-    # The CachyOS base image family. One-directional: distro-cachyos imports nothing back.
-    - cachyos: '@github.com/opencharly/distro-cachyos:v2026.322.1045'
-    # A builder map does NOT cross a namespace boundary (distro-cachyos's box/cachyos states
-    # this outright): a consumer that builds must declare its own. Without this entry the box
-    # validates from its own repo but FAILS when a consumer composes it, with
-    #   box "comfyui": candy "pod-comfyui" needs builder "pixi" but no builder.pixi configured
+    # A builder map does NOT cross a namespace boundary (distro-cachyos's own box/cachyos
+    # states this outright): a box composed by someone else must declare its own map.
     - arch: '@github.com/opencharly/distro-arch:v2026.274.1256'
 
 pod-cdi:
@@ -51,13 +47,34 @@ pod-cdi:
             kernel module and must bake the driver. Mixing the two contracts is what made
             every GPU pod demand a host tool in its image; measured 2026-11-18, a pod on this
             contract serves CUDA with no /usr/bin/nvidia-ctk present.
-        base: cachyos.cachyos
+        # The upstream-published OCI image, pinned by DIGEST, addressed DIRECTLY.
+        #
+        # NOT `cachyos.cachyos` via an import of distro-cachyos: that would make this repo
+        # depend on the very repo that consumes it, and distro-cachyos importing pod-cdi
+        # back is a CYCLE. The distro vocabulary (pac) and the builder map do not cross a
+        # namespace boundary, so a cycle does not merely warn — the consuming build dies
+        # with `box pod-cdi has no distro definition to install [direnv] into`. Addressing
+        # the upstream image directly removes the dependency entirely: nothing imports this
+        # repo back, and this repo imports nothing that imports it.
+        #
+        # Same coordinate as distro-cachyos's box/cachyos, which pins it for the same
+        # reason: Docker Hub publishes only a rolling tag for cachyos-v3, so a digest is the
+        # most precise coordinate available.
+        base: docker.io/cachyos/cachyos-v3@sha256:f50fa29540b3de01845f908202c91e4cddc7d1cdaac1b25ad33332afba94184b
         platform:
             - linux/amd64
         # Declared HERE, not inherited: builder maps do not cross a namespace boundary, so a
         # box that is composed by a consumer must carry its own map or the consumer fails.
         build:
             - pac
+        # The distro VOCABULARY, declared here because this box bases on the upstream OCI
+        # image directly and so inherits no vocabulary from a distro repo. Without it,
+        # `layer-direnv` (via layer-agent-forwarding) fails with
+        #   resolved 1 package(s) [direnv] but box pod-cdi has no distro definition
+        # Same two entries distro-cachyos's box/cachyos declares.
+        distro:
+            - cachyos
+            - arch
         builder:
             aur: arch.arch-builder
             cargo: arch.arch-builder
