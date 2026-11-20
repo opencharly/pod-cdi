@@ -27,7 +27,7 @@
 import:
     # A builder map does NOT cross a namespace boundary (distro-cachyos's own box/cachyos
     # states this outright): a box composed by someone else must declare its own map.
-    - arch: '@github.com/opencharly/distro-arch:v2026.274.1256'
+    - arch: '@github.com/opencharly/distro-arch:v2026.324.0908'
 
 pod-cdi:
     candy:
