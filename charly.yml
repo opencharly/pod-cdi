@@ -27,7 +27,11 @@
 import:
     # A builder map does NOT cross a namespace boundary (distro-cachyos's own box/cachyos
     # states this outright): a box composed by someone else must declare its own map.
-    - arch: '@github.com/opencharly/distro-arch:v2026.324.0908'
+    # The pin tracks distro-arch's CURRENT release: it carries the owned-skill carrier chain
+    # (distro-arch#76, sdk#607, plugin-box#92, charly#1230), without which an image built
+    # through this base emits the retired `COPY --from=<carrier> .agents/skills` step and
+    # fails on a cold build (opencharly/sdk#598, opencharly/pod-kde-vnc#3).
+    - arch: '@github.com/opencharly/distro-arch:v2026.325.1112'
 
 pod-cdi:
     candy:
