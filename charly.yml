@@ -94,4 +94,4 @@ pod-cdi:
             # nvidia-ctk assertions then ran on an image whose composition deletes that
             # binary (opencharly/pod-cdi#5). This is the one pin that keeps the pod contract
             # (no baked driver user-space) true for a consumer that names nothing.
-            - '@github.com/opencharly/layer-cdi:v2026.323.0302'
+            - '@github.com/opencharly/layer-cdi:v2026.326.0828'
