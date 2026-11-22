@@ -31,7 +31,7 @@ import:
     # (distro-arch#76, sdk#607, plugin-box#92, charly#1230), without which an image built
     # through this base emits the retired `COPY --from=<carrier> .agents/skills` step and
     # fails on a cold build (opencharly/sdk#598, opencharly/pod-kde-vnc#3).
-    - arch: '@github.com/opencharly/distro-arch:v2026.325.1112'
+    - arch: '@github.com/opencharly/distro-arch:v2026.326.1455'
 
 pod-cdi:
     candy:
