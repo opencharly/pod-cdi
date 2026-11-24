@@ -31,7 +31,7 @@ import:
     # (distro-arch#76, sdk#607, plugin-box#92, charly#1230), without which an image built
     # through this base emits the retired `COPY --from=<carrier> .agents/skills` step and
     # fails on a cold build (opencharly/sdk#598, opencharly/pod-kde-vnc#3).
-    - arch: '@github.com/opencharly/distro-arch:v2026.326.1455'
+    - arch: '@github.com/opencharly/distro-arch:v2026.328.1543'
 
 pod-cdi:
     candy:
@@ -85,7 +85,7 @@ pod-cdi:
             npm: arch.arch-builder
             pixi: arch.arch-builder
         candy:
-            - '@github.com/opencharly/layer-agent-forwarding:v2026.274.0608'
+            - '@github.com/opencharly/layer-agent-forwarding:v2026.314.0704'
             # The tag is the CONTRACT here, not a version bump: v2026.323.0302 is the release
             # whose `require:` names `layer-cuda:v2026.323.0252`, the toolkit release that
             # dropped `require: layer-nvidia`. A `require:` is target-blind, so pinning an
@@ -94,4 +94,4 @@ pod-cdi:
             # nvidia-ctk assertions then ran on an image whose composition deletes that
             # binary (opencharly/pod-cdi#5). This is the one pin that keeps the pod contract
             # (no baked driver user-space) true for a consumer that names nothing.
-            - '@github.com/opencharly/layer-cdi:v2026.326.0828'
+            - '@github.com/opencharly/layer-cdi:v2026.327.1319'
