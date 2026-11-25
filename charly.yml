@@ -86,12 +86,11 @@ pod-cdi:
             pixi: arch.arch-builder
         candy:
             - '@github.com/opencharly/layer-agent-forwarding:v2026.314.0704'
-            # The tag is the CONTRACT here, not a version bump: v2026.323.0302 is the release
-            # whose `require:` names `layer-cuda:v2026.323.0252`, the toolkit release that
-            # dropped `require: layer-nvidia`. A `require:` is target-blind, so pinning an
-            # earlier `layer-cdi` made every pod that composes this base and overrides
-            # neither layer also compose the VM driver user-space — and `layer-nvidia`'s
-            # nvidia-ctk assertions then ran on an image whose composition deletes that
-            # binary (opencharly/pod-cdi#5). This is the one pin that keeps the pod contract
-            # (no baked driver user-space) true for a consumer that names nothing.
-            - '@github.com/opencharly/layer-cdi:v2026.327.1319'
+            # The tag is the CONTRACT here, not a version bump: v2026.329.2058 is the release
+            # whose contract NO LONGER requires `layer-cuda` (opencharly/layer-cdi#24) — the
+            # toolkit installs driver-free at the source and the consumer CLASS decides who
+            # composes it. Pinning this release is what makes a pod that names nothing
+            # toolkit-free: the contract, the OpenCL ICD file and the build-time assertions, with
+            # no CUDA toolkit and no driver user-space. A class-2/3 consumer composes
+            # `layer-cuda` itself (opencharly/opencharly#1287).
+            - '@github.com/opencharly/layer-cdi:v2026.329.2058'
