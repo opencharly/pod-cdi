@@ -1,7 +1,6 @@
 # pod-cdi — the CDI GPU **pod** base box
 
-The container contract for GPU workloads, and the pod sibling of
-[opencharly/vm-nvidia](https://github.com/opencharly/vm-nvidia).
+The container contract for GPU workloads.
 
 ## The boundary this repo exists to hold
 
@@ -19,7 +18,7 @@ Those are two different images, and mixing them produces the mess this split rem
 an image that bakes a driver user-space which shadows the host's, and whose build
 asserts a host tool is present inside a container.
 
-| | pod-cdi (this repo) | vm-nvidia |
+| | pod-cdi (this repo) | a GPU VM with passthrough |
 |---|---|---|
 | substrate | pod / container | VM with GPU passthrough |
 | driver source | host, injected via CDI | baked into the image |

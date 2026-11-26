@@ -13,7 +13,7 @@
 #                      no nvidia binary in the image. Its own plan steps FAIL the build
 #                      if a host-coupled driver library or nvidia binary is baked.
 #    layer-nvidia  -> the VM contract: driver baked into the image, nvidia-ctk present.
-#                      Correct for opencharly/vm-nvidia, wrong for anything here.
+#                      Correct for a GPU VM image, wrong for anything here.
 #
 #  Measured (2026-11-18): a pod built on this contract serves CUDA with NO
 #  `/usr/bin/nvidia-ctk` in its image —
@@ -21,8 +21,9 @@
 #  — while the host carries the toolkit and the spec:
 #    /usr/bin/nvidia-ctk, /etc/cdi/nvidia.yaml (27076 bytes).
 #
-#  Consumers (all pods): box/comfyui, box/versa, box/selkies-kde-nvidia,
-#  box/selkies-labwc-nvidia in opencharly/distro-cachyos.
+#  Consumers (all pods): box/ai-toolkit-cdi, box/comfyui-cdi, box/cuda-check-cdi,
+#  box/immich-cdi, box/jupyter-ml-cdi, box/ollama-cdi, box/python-ml-cdi,
+#  box/unsloth-studio-cdi in opencharly/distro-cachyos.
 
 import:
     # A builder map does NOT cross a namespace boundary (distro-cachyos's own box/cachyos
@@ -30,14 +31,13 @@ import:
     # The pin tracks distro-arch's CURRENT release: it carries the owned-skill carrier chain
     # (distro-arch#76, sdk#607, plugin-box#92, charly#1230), without which an image built
     # through this base emits the retired `COPY --from=<carrier> .agents/skills` step and
-    # fails on a cold build (opencharly/sdk#598, opencharly/pod-kde-vnc#3).
+    # fails on a cold build (opencharly/sdk#598).
     - arch: '@github.com/opencharly/distro-arch:v2026.328.1543'
 
 pod-cdi:
     candy:
         description: |
-            CDI GPU pod base — the container contract for GPU workloads, and the pod sibling
-            of opencharly/vm-nvidia.
+            CDI GPU pod base — the container contract for GPU workloads.
 
             A GPU container gets its driver from the HOST, not from the image: the kernel
             module is host-global, so the driver user-space is injected per container by the
@@ -47,7 +47,7 @@ pod-cdi:
             enforced, not merely documented.
 
             It deliberately contains NO nvidia-utils, NO LD_LIBRARY_PATH export and NO
-            nvidia-ctk: those belong to opencharly/vm-nvidia, where the guest owns its own
+            nvidia-ctk: those belong to a GPU VM image, where the guest owns its own
             kernel module and must bake the driver. Mixing the two contracts is what made
             every GPU pod demand a host tool in its image; measured 2026-11-18, a pod on this
             contract serves CUDA with no /usr/bin/nvidia-ctk present.

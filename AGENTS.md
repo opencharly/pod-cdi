@@ -3,17 +3,17 @@
 The org rulebook at the umbrella (`opencharly/opencharly` `AGENTS.md`) applies in full.
 This file adds only what is specific to this repo.
 
-## This repo is the POD side of a two-repo boundary
+## This repo holds the POD contract
 
 - **`pod-cdi` (here)** — the boxes it contains are pods. The driver comes from the host via CDI.
   Composes `layer-cdi` and nothing nvidia-baked.
-- **`vm-nvidia`** — contains are VMs with GPU passthrough. The driver is baked.
-  Composes `layer-nvidia`.
+- **A GPU VM with passthrough** — the guest owns its kernel module, so the driver user-space
+  is baked into the image. Such an image composes `layer-nvidia`.
 
 Never compose `layer-nvidia` here. `layer-cdi`'s plan steps enforce that: they fail the
 build when a host-coupled driver library or nvidia binary is baked in. If a change needs
-`nvidia-utils`, `LD_LIBRARY_PATH`, or `nvidia-ctk` in the image, the change belongs in
-`vm-nvidia`, not here.
+`nvidia-utils`, `LD_LIBRARY_PATH`, or `nvidia-ctk` in the image, the change belongs in a VM
+image, not here.
 
 ## Adding a consumer
 
