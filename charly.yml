@@ -63,8 +63,11 @@ pod-cdi:
         #
         # Same coordinate as distro-cachyos's box/cachyos, which pins it for the same
         # reason: Docker Hub publishes only a rolling tag for cachyos-v3, so a digest is the
-        # most precise coordinate available.
-        base: docker.io/cachyos/cachyos-v3@sha256:f50fa29540b3de01845f908202c91e4cddc7d1cdaac1b25ad33332afba94184b
+        # most precise coordinate available. Refreshed 2026-11-24 to the digest Docker Hub
+        # published for `latest` on 2026-11-22T20:29Z (was sha256:f50fa295…, 2026-10-20):
+        #   curl -s https://hub.docker.com/v2/repositories/cachyos/cachyos-v3/tags?page_size=1 \
+        #     | jq -r ".results[0].digest"
+        base: docker.io/cachyos/cachyos-v3@sha256:bf1a0a07ba61654a110ad7958a2d7df895d55e734cd1bb827c6cfb2f5b94452b
         platform:
             - linux/amd64
         # Declared HERE, not inherited: builder maps do not cross a namespace boundary, so a
